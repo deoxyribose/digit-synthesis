@@ -196,7 +196,7 @@ alphabet:
     not rotate with the glyph -- which is what slant means in type, and what
     plate perspective does).
   * **colour, tone, blur, background gradient** are a scene layer *wrapping*
-    the pen layer. That is `scene.py` in the plan: background, ink colour,
+    the pen layer. That is the scene model, still to be written: background,
     per-channel tone, a separable blur, and a crop that composes into the
     affine instead of resampling.
   * **clutter** is the neighbouring glyphs of the string, each its own pen
@@ -269,7 +269,7 @@ a symmetric shape narrow. The target `0` is a narrow italic ellipse, so the
 loop could match its width or its height and compromised by shrinking.
 
 One bounded parameter fixed it -- aspect in the page frame, hard-bounded by
-tanh at [0.64, 1.57] for the reason `rigid.py`'s A_MAX exists, since
+tanh at [0.64, 1.57] for the reason the earlier A_MAX existed, since
 unbounded anisotropy turns a loop into a line and collapses the alphabet:
 
     15508 centred IoU   0.38 -> 0.67        mse 0.1043 -> 0.0766
@@ -317,6 +317,58 @@ heading back the way it came, so a `3` is `+180 (+180) +180`.
    an afternoon and a week. Fix the driver before starting step 2 of anything
    here.
 
+### A string of digits, and why there is no union operator
+
+The DSL has no operator for "draw this glyph and that one". It does not need
+one: **union is already the sum inside `tau`.**
+
+`tau` flattens the sample axis and runs a single einsum, and coverage is
+`1 - exp(-GAIN * tau)` -- an exponential of a SUM. So k glyphs composite by
+concatenating along that axis: one longer einsum, not k einsums, and no
+compositing step. Measured: concatenating two glyphs' samples into one einsum
+equals summing their separate `tau`s to 2.2e-16, float64 epsilon, and the
+gradient reaches each glyph's own `tx` independently (-94.9 and +94.9 on a
+two-glyph string). Soft union is free and already differentiable.
+
+What a string actually needs is three changes, none of them to the alphabet.
+All three are the same kind of change -- one glyph-id array in `enc`, exactly
+the shape `sel` already is:
+
+1. **`place` centres on the inked centroid of everything.** `cx = sum(W*x,
+   (1,2))` reduces over all moves, so two glyphs in one program would each
+   drag the other's centring. It becomes a per-glyph segment sum.
+2. **The heading carries across the whole program.** `phi_in = phi0 +
+   cumsum(rot) + cumsum(theta)` would make glyph 2's orientation a function
+   of how much glyph 1 happened to turn. It becomes a segment-cumsum that
+   resets per glyph.
+3. **The glyph block becomes per-glyph** -- `NG = 7` once becomes 7 each,
+   plus SHARED baseline parameters (pitch, slant).
+
+Point 3 is the one that matters. A shared baseline is what makes neighbours
+**explanatory** rather than free ink: they cannot sit wherever the loss wants
+them, they have to sit at the focal digit's pitch and slant. Free-floating
+neighbour glyphs are just extra ink to absorb the residual -- including
+absorbing the focal digit, which is risk 3.
+
+**The hop is not the mechanism.** `HOPMAX = 20 px`, prior mean ~9.5 px at
+H = 64: it is a within-glyph pen lift, the gap in a 4 or a 5. Building strings
+out of hops would conflate "the pen lifted" with "this is a different digit",
+and that destroys the property the whole design rests on -- a glyph is one
+program whose structure is comparable across instances. A string is k glyph
+programs sharing a baseline, not one long program.
+
+One limit on the free-union claim: it is union in ONE layer, with one colour
+and one pen. Occlusion, and digits of different colours, need genuine
+over-compositing with layers. That is a different mechanism and is the scene
+model's job, not this one's.
+
+Why it is worth doing: 45% of the gate's target ink is neighbouring digits,
+in the residual by construction, and it is the largest single term left. Why
+it is not next: searching k glyphs jointly multiplies the structure space --
+three glyphs over the 3705 programs of <= 3 moves is 3705^3 -- so a string is
+tractable only WITH a proposer, or with a staged fit (focal glyph first,
+neighbours second). It belongs after the proposer, not before it.
+
 ### Order of work
 
 The fitter comes before the network, which is not the paper's order. The
@@ -327,8 +379,8 @@ needs fits, and "did the search work" has no answer without enumeration to
 compare against.
 
     1  dsl.py, check.py, sample.py                    done
-    2  fit.py      batched Adam on the continuous parameters, reusing the
-                   rigidfit.py scan.  Then the GATE, gate.py: hand-write one
+    2  fit.py      batched Adam on the continuous parameters.  Then the
+                   GATE, gate.py: hand-write one
                    program per digit for 12 polarity-matched SVHN crops and
                    fit only the numbers.
                    DONE, and it passes.  Blank beats the fit on 0/12 (risk 1
@@ -339,12 +391,31 @@ compare against.
                    the fair one.  The one real failure, crop 15508, was a
                    MODEL failure and is fixed: a pen loop is always a circle,
                    so the glyph needed a bounded aspect (0.38 -> 0.67).
-                   Cost on this box, CPU: 148 ms/fit at 400 Adam iterations.
-    3  enumerate   all 3705 programs of <= 3 moves (`dsl.structures`), fit on
-                   a few crops, rank by MDL.  This is the ground truth steps
-                   4-5 are measured against.  At 148 ms/fit the full
-                   3705 x 12 restarts x 12 crops is ~18 CPU-hours, so this is
-                   the step where the GPU starts to matter.
+                   Cost on this box, CPU, warm (compile excluded): 130 ms
+                   per fit at 400 Adam iterations, 50 ms at 150.
+    3  enumerate   all 3705 programs of <= 3 moves (`dsl.structures`), fit,
+                   rank by MDL.  This is the ground truth steps 4-5 are
+                   measured against.  Do it in two stages, and do SYNTHETIC
+                   targets before real ones.
+
+                   3a self-generated targets, <= 2 moves (168 legal) as both
+                      the generator and the hypothesis space.  On a target
+                      rendered from a known program the residual goes to zero
+                      for the true structure, so the MDL optimum MUST be the
+                      generating program -- this is the only place "did the
+                      ranking work" has a ground truth.  ~4k fits, 3 minutes.
+                      If a 2-move program cannot be recovered from its own
+                      render, the objective is wrong and no proposer fixes
+                      it.  This is the gate one level up: the gate tested the
+                      DSL's reach, this tests the objective's ranking.
+                   3b the same at <= 3 moves, then the 12 real crops.  Staged
+                      as the paper's own filter: 150 iterations and 4
+                      restarts over all 3705 to shortlist, then 400 and 12 on
+                      the top ~16.  Measured cost 2.6 CPU-hours, against 19
+                      for the single-stage 3705 x 12 x 12.
+
+                   So this step does NOT need the GPU, which an earlier draft
+                   of this note had wrong -- it needs the two-stage filter.
     4  data.py     prefix batches + IoU-to-go targets, from the sampler
     5  net.py      the trunk and heads, hand-rolled Adam
     6  train on synthetic only; report held-out action accuracy and value MSE.
@@ -353,7 +424,7 @@ compare against.
                    will not either, and that is risk 2 settled for the price
                    of one head.
     7  smc.py      particles + resampling, measured against step 3
-    8  scene.py    the colour/blur/background layer and its one-shot head
+    8  scene.py    the colour/blur/background layer and its one-shot head (new)
     9  SVHN, and the domain gap measured rather than assumed
     10 abstraction: mine fragments from the fitted corpus, add them to the
        grammar, retrain the head -- the library changes the PRIOR, which the

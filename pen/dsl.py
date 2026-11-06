@@ -1,6 +1,6 @@
 """A pen, not a set of stamps.  Directional strokes with shared pen state.
 
-`rigid.py` fixed the right problem the wrong way round.  Shape identity became
+An earlier attempt fixed the right problem the wrong way round.  Shape identity became
 one number (the total turn), which was the point, but each piece still carried
 its own absolute affine -- tx, ty, phi, scale, aspect, shear -- so a glyph was
 a *set of independent stamps* that happened to overlap.  Nothing said the
@@ -47,7 +47,7 @@ Per move, three numbers, and a turn uses none of them:
     log len     how far the pen travels.  ARC length, which is the pen's own
                 measure -- a circle of path length L has radius L/2pi, and
                 that is correct here precisely because the pen really does
-                travel L.  (`rigid.py` had to normalise by extent instead,
+                travel L.  (that attempt had to normalise by extent instead,
                 because comparing independent stamps' scales is a different
                 question from asking how far a pen moved.)  Live on draw and
                 hop.
@@ -66,8 +66,9 @@ set off, how broad the nib.  A glyph of three draws, a turn and a hop is
 
 Deliberately not here yet: brush profile, serifs, per-stroke width, and the
 scene around the glyph (ink colour, background, blur, neighbours), which is a
-layer wrapping this one and not something a pen does.  `turtle.py` already has
-the broad-nib width model to graft on.
+layer wrapping this one and not something a pen does.  A broad-nib width
+model is the natural first addition, and it grafts onto `weights` without
+touching the geometry.
 """
 
 import itertools
@@ -287,7 +288,7 @@ def ext_frac(theta):
 
     A pen that walks L round a closed loop spans only L/pi, and one that walks
     L in a straight line spans L.  The parameter is and stays ARC length --
-    that is the pen's own measure, and `rigid.py`'s extent normalisation is
+    that is the pen's own measure, and an extent normalisation is
     exactly what made two pieces incomparable once they were chained.  But a
     PRIOR that puts the same mass on "walk 30 px" for a line and for a loop
     says a loop should be a third the size of a line, which is not what anyone
@@ -395,7 +396,7 @@ def place(P, w, p, cfg=PEN):
     # Aspect and slant are PAGE properties, like condensed or italic type: a
     # narrow digit is narrow on the page whichever way the pen was moving.
     # Bounded hard by tanh rather than priced, for the reason A_MAX exists in
-    # rigid.py -- unbounded anisotropy is a shape change in disguise, and at
+    # the earlier A_MAX -- unbounded anisotropy is a shape change in disguise, and at
     # log a = 2 a loop is a line and the alphabet has quietly collapsed.
     asp = jnp.exp(cfg.ASPECT * jnp.tanh(g[:, GI['log a']]))[:, None, None]
     x, y = x * asp, y / asp

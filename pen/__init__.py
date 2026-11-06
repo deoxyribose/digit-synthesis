@@ -15,6 +15,6 @@ not the coordinates, carries the shape.
     README.md   the proposer design note (write/execute/assess)
 
 Run the scripts as modules from the repo root, which is where their imports of
-`imageio`, `svhn_fit` and the rest resolve.  Nothing is imported here: `fit`
+`imageio` and `svhn_data` resolve.  Nothing is imported here: `fit`
 pulls in jax and the SVHN loader, and `dsl` alone is cheap.
 """
