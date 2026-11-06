@@ -398,24 +398,60 @@ compare against.
                    measured against.  Do it in two stages, and do SYNTHETIC
                    targets before real ones.
 
-                   3a self-generated targets, <= 2 moves (168 legal) as both
+                   3a self-generated targets, <= 2 moves (181 legal) as both
                       the generator and the hypothesis space.  On a target
                       rendered from a known program the residual goes to zero
-                      for the true structure, so the MDL optimum MUST be the
-                      generating program -- this is the only place "did the
-                      ranking work" has a ground truth.  ~4k fits, 3 minutes.
-                      If a 2-move program cannot be recovered from its own
-                      render, the objective is wrong and no proposer fixes
-                      it.  This is the gate one level up: the gate tested the
-                      DSL's reach, this tests the objective's ranking.
-                   3b the same at <= 3 moves, then the 12 real crops.  Staged
-                      as the paper's own filter: 150 iterations and 4
-                      restarts over all 3705 to shortlist, then 400 and 12 on
-                      the top ~16.  Measured cost 2.6 CPU-hours, against 19
-                      for the single-stage 3705 x 12 x 12.
+                      for the true structure, so this is the only place "did
+                      the ranking work" has a ground truth.  DONE, and the
+                      objective passes: recall 8/8, recovery 7/8, explained
+                      8/8, and the 8th is a genuine equivalence rather than a
+                      wrong answer -- for a SINGLE arc, `+a` and `-a` differ
+                      by a 180 degree rotation, which `phi0` can produce, so
+                      they are the same picture and no score can separate
+                      them.  15,680 fits, 33 minutes.
 
-                   So this step does NOT need the GPU, which an earlier draft
-                   of this note had wrong -- it needs the two-stage filter.
+                      Getting there took one correction worth recording.  The
+                      first run said recovery 8/12 and looked like an
+                      objective failure.  It was a SEARCH failure: at 4
+                      restarts x 150 iterations stage A dropped the true
+                      structure from the shortlist once in 12, and at 12 x
+                      400 stage B left it under-fitted against a rival three
+                      more times -- `+90 -45` only beat `+45 -` at 64 x 1200.
+                      Hence the budgets below, the generator being forced
+                      into stage B regardless of stage A, and residuals
+                      compared RELATIVELY: an absolute 1e-4 tolerance on
+                      residuals that run to 1e-12 had called a 3x worse fit
+                      "equivalent" and hidden exactly those failures.
+                   3b the same at <= 3 moves, then the 12 real crops.  Stage
+                      A 150 iterations x 8 restarts over all 3705 to
+                      shortlist, stage B 1200 x 64 on the top 8.  At the
+                      measured 127 ms/fit that is ~7 CPU-hours for 12
+                      targets, not the 2.6 an earlier draft of this note
+                      claimed: the two-stage filter saves less than it looks
+                      once stage B is given a budget that actually converges.
+                      Still an overnight job, still no GPU.
+
+                   One thing to watch in 3b, measured in 3a.  The MDL
+                   parameter term is the prior's negative log DENSITY, which
+                   is a differential entropy and not a code length: at
+                   SD_LEN = 0.35 a parameter at its prior mean contributes
+                   log(0.35*sqrt(2pi)) = -0.13 nats, so the term REWARDS
+                   extra parameters.  Net, an extra move costs +3.2 nats and
+                   repays that by improving mse 0.62%; under a BIC term,
+                   (k/2) log N, it is +12.6 nats and 2.4%.  On noiseless
+                   targets this does not bite -- BIC and the prior both gave
+                   7/8 -- because the true structure reaches zero.  Against
+                   SVHN's texture floor almost any extra freedom buys 0.62%,
+                   so expect the prior term to favour whichever structure has
+                   the most slots.  `enumerate.py` reports both rankings.
+
+                   Also measured in 3a: the residual term dwarfs the other
+                   two (sd 1379 nats against 1.2 for structure and 40.3 for
+                   parameters over the top candidates), so within one image
+                   the ranking is very nearly "best fit" and the structure
+                   prior is close to decorative.  That is fine where the true
+                   structure can reach zero and is the thing most likely to
+                   mislead where it cannot.
     4  data.py     prefix batches + IoU-to-go targets, from the sampler
     5  net.py      the trunk and heads, hand-rolled Adam
     6  train on synthetic only; report held-out action accuracy and value MSE.
