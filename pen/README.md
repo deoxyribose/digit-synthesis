@@ -422,7 +422,14 @@ compare against.
                       compared RELATIVELY: an absolute 1e-4 tolerance on
                       residuals that run to 1e-12 had called a 3x worse fit
                       "equivalent" and hidden exactly those failures.
-                   3b the same at <= 3 moves, then the 12 real crops.  Stage
+                   3a-wide DONE at <= 3 moves, 3705 structures, 6 targets,
+                      1h55m: recall 4/6, recovery 5/6, explained 6/6, BIC
+                      agrees 5/6.  The objective survives a 20x bigger
+                      hypothesis space.  Recall fell from 8/8 because stage A
+                      keeps the top 8 of 3705 (0.2%) rather than of 181
+                      (4.4%) -- which is what the climb is for, though this
+                      run cannot prove the climb recovers it, see below.
+    3b the same at <= 3 moves, then the 12 real crops.  Stage
                       A 150 iterations x 8 restarts over all 3705 to
                       shortlist, stage B 1200 x 64 on the top 8.  At the
                       measured 127 ms/fit that is ~7 CPU-hours for 12
@@ -444,6 +451,31 @@ compare against.
                    SVHN's texture floor almost any extra freedom buys 0.62%,
                    so expect the prior term to favour whichever structure has
                    the most slots.  `enumerate.py` reports both rankings.
+
+                   REFIT NOISE, and why it is not the problem it looked
+                   like.  On synthetic targets, changing only the random seed
+                   moved the score by up to 15x in mse -- 1398 nats, against
+                   a structure-term spread of 1.7 and a per-move cost of 3.2.
+                   That would make the ranking a lottery.  It does not
+                   transfer: the residual term is 512*log(mse), so log
+                   amplifies relative differences at mse ~1e-9, and a
+                   noiseless target lets the true structure get there.  On a
+                   REAL crop, where every structure sits near the texture
+                   floor at mse ~0.08, the same measurement gives 0 to 2
+                   nats against 78 nats between competing structures.  So the
+                   real-crop ranking is not decided by optimiser luck, and
+                   the synthetic one is noisy exactly where it does not
+                   matter (the true structure wins by orders of magnitude
+                   anyway).
+
+                   A GAP this run does not close.  `rank_one` forces the
+                   generator into stage B whatever stage A thought, which is
+                   what makes the objective testable -- but it also means
+                   recovery 5/6 does not say the SEARCH would have found the
+                   generator on the 2 crops where recall failed.  To measure
+                   that, the climb has to run from the shortlist alone and be
+                   checked for whether it reaches the generator.  Two
+                   numbers, not one; only the first is measured so far.
 
                    Also measured in 3a: the residual term dwarfs the other
                    two (sd 1379 nats against 1.2 for structure and 40.3 for

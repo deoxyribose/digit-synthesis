@@ -58,6 +58,8 @@ import numpy as np
 
 import imageio as IO
 
+import svhn_data as D
+
 from . import dsl as PN
 from . import fit as PF
 
@@ -65,6 +67,7 @@ CFG = PN.PEN
 OUT = "out_shots"
 N_TGT = int(sys.argv[1]) if len(sys.argv) > 1 else 12
 NMAX = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+REAL = len(sys.argv) > 3 and sys.argv[3] == "real"
 # Stage A shortlists cheaply over everything, stage B refits the survivors
 # properly.  Measured on CPU: 50 ms per fit at 150 iterations, 130 at 400, so
 # spending the long runs only on the top few is a 7x saving overall.
@@ -251,6 +254,9 @@ def main():
         rank = order.index(gen[i])
         rows.append(Ranked(order, total, tbic, parts, pb, fb, rank, rec))
         wins.append(order[0])
+        print(f"  [{i + 1}/{N_TGT}] {PN.show(gen[i]):22s} -> "
+              f"{PN.show(order[0]):22s} rank {rank:3d}  "
+              f"{time.time() - t0:6.0f}s", flush=True)
     wall = time.time() - t0
     print(f"wall {wall:.1f}s, {wall / (nfit * N_TGT) * 1000:.0f} ms/fit\n")
 
@@ -338,5 +344,69 @@ def main():
     print(f"\nwrote {OUT}/enum_self.png  (target | winner | overlay)")
 
 
+def main_real():
+    """The same enumeration against the 12 real SVHN crops.
+
+    No generator here, so recall and recovery are undefined -- there is no
+    known right answer, which is exactly why 3a had to come first.  What this
+    produces is the ground-truth table the proposer is measured against: per
+    crop, the best structure exhaustive search plus hill-climbing can find,
+    its description length under both parameter terms, and its overlap.
+
+    Refit noise, measured on crop 595, is 0 to 2 nats here against 78 nats
+    between competing structures, so unlike the synthetic case the ranking is
+    not decided by optimiser luck.
+    """
+    d = D.load()
+    tgt = np.asarray(d["ink"], np.float32)[:N_TGT]
+    lab = np.asarray(d["y"]).reshape(-1).astype(int)[:N_TGT]
+    idx = np.asarray(d["idx"])[:N_TGT]
+    hyps = PN.structures(CFG, nmax=NMAX)
+    print(f"{len(hyps)} legal structures of <= {NMAX} moves, "
+          f"{N_TGT} real SVHN crops")
+    print(f"stage A {A_ITER} iter x {A_RESTART}, stage B = {B_ROUNDS} climb "
+          f"rounds at {B_ITER} x {B_RESTART}\n")
+
+    t0 = time.time()
+    rows, wins = [], []
+    for i in range(N_TGT):
+        order, total, tbic, parts, pb, fb, _ = rank_one(hyps, tgt[i], seed=i)
+        rows.append(Ranked(order, total, tbic, parts, pb, fb, -1, True))
+        wins.append(order[0])
+        print(f"  [{i + 1}/{N_TGT}] crop {idx[i]:6d} lab {lab[i]} -> "
+              f"{PN.show(order[0]):24s} mse {fb[0]:.4f}  "
+              f"{time.time() - t0:6.0f}s", flush=True)
+    print(f"\nwall {time.time() - t0:.0f}s")
+
+    wp = np.stack([r.params[0] for r in rows])
+    aw = np.asarray(PN.alpha(wp, PN.encode(wins, CFG), CFG, down=2))
+    IU, IC = PF.iou(aw, tgt), PF.iou(aw, tgt, core=PF.CORE)
+    bl = PF.blank_mse(tgt)
+
+    print()
+    print("  crop   lab   mse   blank  IoU  IoUc   L_prior   L_bic   best structure")
+    for i in range(N_TGT):
+        r = rows[i]
+        print(f" {idx[i]:6d}  {lab[i]}  {r.res[0]:.4f} {bl[i]:.4f} "
+              f"{IU[i]:.2f} {IC[i]:.2f} {r.total[0]:9.1f} {r.bic[0]:8.1f}  "
+              f"{PN.show(wins[i])}")
+
+    print()
+    print(f"IoU    median {np.median(IU):.2f} full frame, "
+          f"{np.median(IC):.2f} centred   (gate, hand-written: 0.60 / 0.71)")
+    print(f"blank beats the fit on {int((np.array([r.res[0] for r in rows]) >= bl).sum())}/{N_TGT}")
+    nm = np.array([len(w) for w in wins])
+    print(f"moves in the winner: mean {nm.mean():.1f}, max {nm.max()} "
+          f"(the cap is {NMAX})")
+    agree = sum(int(np.argmin(r.bic) == 0) for r in rows)
+    print(f"BIC and the prior term agree on the winner for {agree}/{N_TGT} crops")
+
+    tiles = [np.concatenate([IO.ink(tgt[i]), IO.ink(aw[i]),
+                             IO.overlay(aw[i], tgt[i])], axis=1)
+             for i in range(N_TGT)]
+    IO.save(f"{OUT}/enum_real.png", IO.grid(tiles, 4), 3)
+    print(f"\nwrote {OUT}/enum_real.png  (ink | best program | overlay)")
+
+
 if __name__ == "__main__":
-    main()
+    main_real() if REAL else main()
