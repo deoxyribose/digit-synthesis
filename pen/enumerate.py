@@ -75,8 +75,14 @@ NMAX = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 # 64 x 1200 (1.2e-7 against 3.1e-7).  Reading those as objective failures
 # would have been wrong; they were search failures, and the cost of finding
 # that out was one hard refit.
-A_RESTART, A_ITER = 8, 150
-B_KEEP, B_RESTART, B_ITER = 8, 64, 1200
+A_RESTART, A_ITER = 4, 150
+B_KEEP, B_RESTART, B_ITER = 4, 8, 400
+B_ROUNDS = 2
+# Stage A is back to 4 restarts, which 3a showed was too weak when stage B
+# merely refitted the shortlist.  It is adequate now BECAUSE stage B climbs:
+# a climb recovers from a shortlist that lands near the answer, where a refit
+# can only polish whatever it was handed.  Measured budget at <= 3 moves:
+# stage A 12 min a target, stage B 12.
 
 
 def make_targets(rng, hyps, n):
@@ -95,13 +101,80 @@ def make_targets(rng, hyps, n):
     return gen, p, tgt
 
 
+def neighbours(prog, cfg=CFG, nmax=None):
+    """Every program one edit away: retune a move's angle, insert a move,
+    delete a move.  `legal` does the pruning.
+
+    `nmax` caps the length the climb may reach.  It matters for the
+    self-generated experiment: insertion otherwise walks straight out of the
+    space the generator was drawn from, and since a longer program fits
+    better and the complexity penalty is weak (+3.2 nats a move), the climb
+    would "win" by leaving the comparison rather than by solving it.
+
+    This is the move set hill-climbing and SMC refinement both walk, and it
+    is small -- 84 on average for a <= 3-move program, against 3705 to
+    enumerate, so a climb step is 44x cheaper than a sweep.  It costs no new
+    machinery either: discrete choices ride as data, so "this program and all
+    its neighbours" is the same compiled kernel call as "all 3705
+    structures".
+    """
+    lim = cfg.NMOVE if nmax is None else min(nmax, cfg.NMOVE)
+    out, n = set(), len(prog)
+    for i in range(n):
+        k = PN.kind(prog[i])
+        for a in (PN.DRAWS if k == "d" else PN.SPINS if k == "t" else ()):
+            q = prog[:i] + ((prog[i][0], a),) + prog[i + 1:]
+            if PN.legal(q, cfg):
+                out.add(q)
+        q = prog[:i] + prog[i + 1:]
+        if q and PN.legal(q, cfg):
+            out.add(q)
+    moves = ([PN.draw(a) for a in PN.DRAWS]
+             + [PN.spin(a) for a in PN.SPINS] + [PN.HOP])
+    for i in range(n + 1):
+        for m in moves:
+            q = prog[:i] + (m,) + prog[i:]
+            if len(q) <= lim and PN.legal(q, cfg):
+                out.add(q)
+    out.discard(prog)
+    return sorted(out)
+
+
+def climb(seeds, tgt, seed=0, rounds=3, keep=8, n_restart=16, n_iter=400,
+          nmax=None):
+    """Hill-climb from `seeds` over the edit neighbourhood, by description
+    length.  Returns every program evaluated, with its score.
+
+    This is stage B, and it replaces refitting the shortlist harder.  The
+    difference matters because stage A over 3705 structures keeps the top 8 --
+    0.2%, twenty times harsher than the 4.4% that gave 3a its 8/8 recall.  A
+    harder refit of a near-miss shortlist cannot reach the answer; a climb
+    only needs the shortlist to land NEAR it.
+    """
+    seen = {}
+    front = list(dict.fromkeys(seeds))
+    for _ in range(rounds):
+        cand = [q for pr in front for q in neighbours(pr, CFG, nmax)] + front
+        cand = [q for q in dict.fromkeys(cand) if q not in seen]
+        if not cand:
+            break
+        t = np.repeat(tgt[None], len(cand), 0)
+        p, _, f = PF.run(cand, t, CFG, n_restart, n_iter, 0.05, seed=seed,
+                         chunk=512)
+        tot = PF.mdl(cand, p, f, CFG).sum(1)
+        for j, q in enumerate(cand):
+            seen[q] = (tot[j], f[j], p[j])
+        front = [q for q in sorted(seen, key=lambda z: seen[z][0])[:keep]]
+    return seen
+
+
 @dataclass
 class Ranked:
     """One target's ranking.  A record, not a tuple: this started as a tuple
     and grew a field twice, and both times a positional index somewhere else
     silently read the wrong column -- once crashing the run after all the
     useful output had already printed."""
-    order: np.ndarray        # hypothesis indices, best first
+    order: list              # programs, best first
     total: np.ndarray        # description length, prior parameter term
     bic: np.ndarray          # description length, BIC parameter term
     parts: np.ndarray        # (k, 3) residual / structure / parameters
@@ -142,28 +215,32 @@ def rank_one(hyps, tgt, seed=0, must=None):
     _, _, fa = PF.run(hyps, t, CFG, A_RESTART, A_ITER, 0.05, seed=seed, chunk=512)
     short = list(np.argsort(fa)[:B_KEEP])
     recall = must is None or must in short
+    seeds = [hyps[i] for i in short]
     if must is not None and not recall:
-        short.append(must)
-    short = np.array(short)
-    sub = [hyps[i] for i in short]
-    pb, _, fb = PF.run(sub, t[:len(sub)], CFG, B_RESTART, B_ITER, 0.05,
-                       seed=seed, chunk=512)
-    parts = PF.mdl(sub, pb, fb, CFG)          # [residual, structure, params]
+        seeds.append(hyps[must])          # measure ranking, not stage A's luck
+    seen = climb(seeds, tgt, seed=seed, rounds=B_ROUNDS, keep=B_KEEP,
+                 n_restart=B_RESTART, n_iter=B_ITER, nmax=NMAX)
+    progs = list(seen)
+    pb = np.stack([seen[q][2] for q in progs])
+    fb = np.array([seen[q][1] for q in progs])
+    parts = PF.mdl(progs, pb, fb, CFG)        # [residual, structure, params]
     tot = parts.sum(1)
-    tot_bic = parts[:, 0] + parts[:, 1] + bic_par(sub)
+    tot_bic = parts[:, 0] + parts[:, 1] + bic_par(progs)
     o = np.argsort(tot)
-    return short[o], tot[o], tot_bic[o], parts[o], pb[o], fb[o], recall
+    return ([progs[i] for i in o], tot[o], tot_bic[o], parts[o], pb[o], fb[o],
+            recall)
 
 
 def main():
     rng = np.random.default_rng(0)
     hyps = PN.structures(CFG, nmax=NMAX)
     gen, gp, tgt = make_targets(rng, hyps, N_TGT)
-    nfit = len(hyps) * A_RESTART + B_KEEP * B_RESTART
+    nfit = len(hyps) * A_RESTART + B_ROUNDS * B_KEEP * 84 * B_RESTART // 8
     print(f"{len(hyps)} legal structures of <= {NMAX} moves, {N_TGT} "
           f"self-generated targets")
     print(f"{nfit} fits per target, {nfit * N_TGT} total "
-          f"(stage A {A_ITER} iter x {A_RESTART}, stage B {B_ITER} x {B_RESTART})")
+          f"(stage A {A_ITER} iter x {A_RESTART}, stage B = "
+          f"{B_ROUNDS} climb rounds at {B_ITER} x {B_RESTART})")
 
     t0 = time.time()
     rows, wins = [], []
@@ -171,9 +248,9 @@ def main():
     for i in range(N_TGT):
         order, total, tbic, parts, pb, fb, rec = rank_one(
             hyps, tgt[i], seed=i, must=gidx[i])
-        rank = [j for j, k in enumerate(order) if k == gidx[i]][0]
+        rank = order.index(gen[i])
         rows.append(Ranked(order, total, tbic, parts, pb, fb, rank, rec))
-        wins.append(hyps[order[0]])
+        wins.append(order[0])
     wall = time.time() - t0
     print(f"wall {wall:.1f}s, {wall / (nfit * N_TGT) * 1000:.0f} ms/fit\n")
 
@@ -216,6 +293,44 @@ def main():
     # one batched render of every winner at its own fitted parameters
     wp = np.stack([r.params[0] for r in rows])
     aw = np.asarray(PN.alpha(wp, PN.encode(wins, CFG), CFG, down=2))
+    # --------------------------------------------------- the basin map
+    # Hill-climbing assumes the structure landscape is locally searchable:
+    # that single edits lead from a good-but-wrong program to the best one
+    # without first passing through worse ones.  Discrete program spaces are
+    # full of plateaus where that is false.  This measures it on the one data
+    # we have a full ranking for -- start a climb from the k-th best
+    # structure and see whether it arrives at the best.  The largest k that
+    # still arrives is how many structurally distinct particles SMC needs to
+    # carry; if only k = 1 works, hill-climbing is not enough and the
+    # proposer has to be right first time.
+    print()
+    print("basin map: climb from the k-th best structure, does it reach the best?")
+    KS, NB = (1, 4, 16), min(N_TGT, 3)
+    print("  target   " + "   ".join(f"k={k:<3d}" for k in KS))
+    hit = {k: 0 for k in KS}
+    for i in range(NB):
+        r = rows[i]
+        best = r.order[0]
+        line = []
+        for k in KS:
+            if k > len(r.order):
+                line.append("  -   ")
+                continue
+            seen = climb([r.order[k - 1]], tgt[i], seed=100 + i, rounds=2,
+                         keep=2, n_restart=8, n_iter=B_ITER, nmax=NMAX)
+            got = min(seen, key=lambda z: seen[z][0])
+            ok = got == best
+            hit[k] += ok
+            line.append(" yes  " if ok else " no   ")
+        print(f"  {i:5d}   " + "  ".join(line))
+    print("  reached the best from " + ", ".join(
+        f"k={k} on {hit[k]}/{NB}" for k in KS))
+    print("  k=1 is the CONTROL: a climb started from the best should return")
+    print("  it, so a 'no' there is refit noise, not landscape structure, and")
+    print("  the other columns mean little until it is clean.")
+    print("  -> the largest clean k is how many structurally distinct")
+    print("     particles SMC has to carry.")
+
     tiles = [np.concatenate([IO.ink(tgt[i]), IO.ink(aw[i]),
                              IO.overlay(aw[i], tgt[i])], axis=1)
              for i in range(N_TGT)]
