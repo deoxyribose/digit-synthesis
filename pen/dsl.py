@@ -586,8 +586,22 @@ def _bare_drop(prog, nxt):
     return ("0",) if (not nxt and prog and prog[-1] == ("d", "0")) else ()
 
 
-def sample_struct(rng, cfg=PEN):
-    prog = [draw(_pick(rng, DP))]
+def sample_struct(rng, cfg=PEN, prog=()):
+    """Draw a structure from the prior, optionally CONTINUING one.
+
+    `prog` is a prefix to extend, which is what makes a divergent training
+    pair: two programs that agree up to move t and part afterwards, which is
+    the discrimination SMC actually has to make.  An empty prefix is the
+    plain prior and takes the identical code path, so the sample stream is
+    unchanged.  A prefix that stops mid-group -- ending on a hop or a turn --
+    is first completed with the draw that group owes, because `groups` is the
+    sampler's unit and a program that ends on a turn is not legal.
+    """
+    prog = list(prog)
+    if not prog:
+        prog = [draw(_pick(rng, DP))]
+    elif kind(prog[-1]) != "d":
+        prog.append(draw(_pick(rng, DP, _bare_drop(prog[:-1], prog[-1:]))))
     while True:
         if rng.random() < P_STOP:
             break

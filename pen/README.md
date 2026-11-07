@@ -536,7 +536,42 @@ compare against.
                       ranking, and it is an UNDER-fit, not noise in both
                       directions.
 
-    4  data.py     prefix batches + IoU-to-go targets, from the sampler
+    4  data.py     prefix batches + IoU-to-go targets, from the sampler.
+                   DONE.  One example per PREFIX, so a 5-move program is 6
+                   decisions; 64 programs give ~400 examples and 32 MiB.
+                   Each example carries the 5-channel input, the pen tip for
+                   the bilinear readout, the generator's own (kind, angle,
+                   length-bucket), the legality masks (`legal` itself,
+                   evaluated incrementally, not a second copy of its rules)
+                   and the value.
+
+                   The decision that makes it work: a prefix is rendered with
+                   `alpha(..., sel=)`, so the ink is masked AFTER `place` and
+                   each partial drawing sits where it will sit when finished.
+                   Rendering the prefix on its own re-centres it on its own
+                   centroid and teaches the policy that the drawing slides
+                   around as it is drawn.  The batch asserts it: a
+                   full-length prefix equals the finished render to 1e-5.
+
+                   Targets come three ways, because if every target were the
+                   prefix's own the value would be 1.0 everywhere and the
+                   head would learn a constant.  Measured over 400 examples:
+
+                       matched     value 1.000            (own program)
+                       divergent   value 0.45 +- 0.24     (same prefix,
+                                   prior-sampled completion, same pose)
+                       unrelated   value 0.27 +- 0.11     (another target)
+
+                   5-8% of DIVERGENT targets still score >= 0.9 -- two
+                   different completions of the same prefix that draw nearly
+                   the same picture.  That is a ceiling on what any value
+                   head can score, Markov or not, and it is the number risk 2
+                   has to be argued against rather than the raw gap.
+
+                   This module ASSUMES THE STEP-8 SCENE HEAD.  Training
+                   canvases are placed by the generator's own pose; at
+                   inference nothing knows the pose until a one-shot head
+                   regresses it.  Until then SMC has to be handed one.
     5  net.py      the trunk and heads, hand-rolled Adam
     6  train on synthetic only; report held-out action accuracy and value MSE.
                    Train the VALUE HEAD FIRST and alone: if a Markov value
