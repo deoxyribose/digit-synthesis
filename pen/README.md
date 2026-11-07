@@ -484,6 +484,55 @@ compare against.
                    prior is close to decorative.  That is fine where the true
                    structure can reach zero and is the thing most likely to
                    mislead where it cannot.
+                   3b real crops, <= 3 moves (3705 legal).  Killed by
+                      accident at 10 of 12 crops, after ~2h25m; the winners
+                      below are what it found, refitted from their structures
+                      to recover the numbers the lost summary would have
+                      printed.  9 of the 10 refits land within 1.3 nats of
+                      the killed run.
+
+    crop  lab    mse   blank    R2   IoU  IoUc   L_prior    L_bic   structure
+     595   2  0.0402  0.1882 +0.67  0.75  0.80   -1507.4  -1578.3   +90 +180 -270
+    3006   1  0.0380  0.2005 +0.63  0.76  0.86   -1577.4  -1617.2   -135 ^ -90
+    3158   6  0.0448  0.1876 +0.58  0.71  0.80   -1509.2  -1520.8   -270 +360 -45
+    3598   3  0.1135  0.2227 -0.09  0.54  0.55   -1072.4  -1056.2   -360 ^ -180
+   10456   2  0.0267  0.1303 +0.71  0.75  0.69   -1753.7  -1786.8   +45 +360 +135
+   12423   1  0.0395  0.2023 +0.63  0.79  0.80   -1593.7  -1588.5   - +180 +45
+   12673   4  0.0184  0.0842 +0.74  0.72  0.78   -1956.0  -1977.7   +90 +270 +90
+   15303   8  0.0370  0.1379 +0.61  0.69  0.87   -1640.5  -1618.5   -360 -180 +270
+   15508   0  0.0568  0.1265 +0.36  0.51  0.65   -1262.8  -1410.8   -90 ^ -360
+   18275   5  0.0511  0.1332 +0.43  0.58  0.73   -1367.3  -1455.8   -270 +180 -
+
+                      Search beats the hand-written gate on every number:
+                      IoU median 0.71 / 0.79 against 0.60 / 0.71, >= 0.5 on
+                      10/10 and 10/10 against 10/12 and 9/12, R^2 median
+                      +0.62 against +0.41.  Blank still beats the fit on
+                      0/10.  Crop 3598 is the one failure, R^2 -0.09: a
+                      low-contrast "33" where the program drew a circle and
+                      an arc over the wrong digit.
+
+                      EVERY winner uses all 3 moves, so the cap is binding
+                      and this table is a lower bound -- <= 4 moves would
+                      win again.  That is the data term dominating, as 3a
+                      measured: a move costs +3.2 nats under the prior and
+                      repays it with 0.62% of mse.
+
+                      What was lost with the run and is NOT recoverable from
+                      the winners: whether BIC and the prior term rank the
+                      same structure first.  The two differ by a mean 37
+                      nats on the winners alone -- the same order as the 78
+                      nats between competing structures -- so they can
+                      disagree, and the question stands.  Re-measuring it
+                      costs ~15 min per crop.
+
+                      Refit noise, re-measured here on 10 crops rather than
+                      1: nine agree to within 1.3 nats, and crop 18275 came
+                      back 13% BETTER (72 nats) from a different seed.  So
+                      the earlier "0 to 2 nats" was optimistic; the drift is
+                      usually negligible but has a tail big enough to flip a
+                      ranking, and it is an UNDER-fit, not noise in both
+                      directions.
+
     4  data.py     prefix batches + IoU-to-go targets, from the sampler
     5  net.py      the trunk and heads, hand-rolled Adam
     6  train on synthetic only; report held-out action accuracy and value MSE.
