@@ -453,6 +453,22 @@ compare against.
                       they are the same picture and no score can separate
                       them.  15,680 fits, 33 minutes.
 
+                      RE-RUN with `fit.polish`, on the GPU: recovery 7/8 and
+                      BIC 7/8, unchanged, 242s.  Recall fell to 6/8 -- it is
+                      a stage-A number, untouched by the polish, and stage A
+                      at 4 x 150 is coarse enough that different float
+                      arithmetic reshuffles the 0.2% it keeps.  The 8th is
+                      still `-45` losing to `+45`, and that one IS a genuine
+                      equivalence, though not for the reason given above: a
+                      rotation preserves orientation, so `phi0` cannot turn
+                      one into the other.  It takes the fit's own slant and
+                      aspect.  Measured at three budgets, the rival tracks
+                      the true structure all the way down -- 8x400 true
+                      2.75e-06 rival 1.11e-06, 64x1200 4.76e-08 / 3.64e-08,
+                      256x3000 2.01e-08 / 2.05e-08 -- so they draw the same
+                      picture and the truth only edges ahead, by 9 nats, at a
+                      budget no search would pay.
+
                       Getting there took one correction worth recording.  The
                       first run said recovery 8/12 and looked like an
                       objective failure.  It was a SEARCH failure: at 4
@@ -472,6 +488,13 @@ compare against.
                       keeps the top 8 of 3705 (0.2%) rather than of 181
                       (4.4%) -- which is what the climb is for, though this
                       run cannot prove the climb recovers it, see below.
+
+                      RE-RUN with `fit.polish`: recovery 5/6 -> 6/6 and BIC
+                      5/6 -> 6/6, recall unchanged at 4/6, in 184s against
+                      1h55m.  The miss was an under-fitted true structure
+                      losing to a rival, which is exactly what the polish is
+                      for, and 3a's own history had recorded the same shape
+                      of failure -- `+90 -45` only beat `+45 -` at 64 x 1200.
     3b the same at <= 3 moves, then the 12 real crops.  Stage
                       A 150 iterations x 8 restarts over all 3705 to
                       shortlist, stage B 1200 x 64 on the top 8.  At the
@@ -495,14 +518,19 @@ compare against.
                    so expect the prior term to favour whichever structure has
                    the most slots.  `enumerate.py` reports both rankings.
 
-                   REFIT NOISE, and why it is not the problem it looked
-                   like.  On synthetic targets, changing only the random seed
-                   moved the score by up to 15x in mse -- 1398 nats, against
-                   a structure-term spread of 1.7 and a per-move cost of 3.2.
-                   That would make the ranking a lottery.  It does not
-                   transfer: the residual term is 512*log(mse), so log
-                   amplifies relative differences at mse ~1e-9, and a
-                   noiseless target lets the true structure get there.  On a
+                   REFIT NOISE.  This paragraph was WRONG and step 7
+                   corrected it; the correction is kept here because the
+                   mistake is instructive.  On synthetic targets, changing
+                   only the random seed moved the score by up to 15x in mse
+                   -- 1398 nats, against a structure-term spread of 1.7 and a
+                   per-move cost of 3.2.  I argued it did not matter because
+                   "a noiseless target lets the true structure get there" --
+                   to mse ~1e-9, where it wins by orders of magnitude anyway.
+                   It does not get there.  Measured: at the search's own
+                   budget the GENERATING structure sits at median mse 2.2e-07
+                   when 64 x 1200 reaches 3.7e-10, a median 3429 nats of pure
+                   optimisation slack.  The premise was never checked, and
+                   the whole argument rested on it.  `fit.polish` is the fix.  On a
                    REAL crop, where every structure sits near the texture
                    floor at mse ~0.08, the same measurement gives 0 to 2
                    nats against 78 nats between competing structures.  So the
@@ -527,57 +555,57 @@ compare against.
                    prior is close to decorative.  That is fine where the true
                    structure can reach zero and is the thing most likely to
                    mislead where it cannot.
-                   3b real crops, <= 3 moves (3705 legal).  Killed by
-                      accident at 10 of 12 crops, after ~2h25m; the winners
-                      below are what it found, refitted from their structures
-                      to recover the numbers the lost summary would have
-                      printed.  9 of the 10 refits land within 1.3 nats of
-                      the killed run.
+                   3b real crops, <= 3 moves (3705 legal).  DONE, all 12,
+                      RE-RUN with `fit.polish` after step 7 found the fitter
+                      was deciding the rankings.  496s on the GPU, against
+                      ~2h25m for the 10 crops the first CPU run reached
+                      before it was killed.
 
     crop  lab    mse   blank    R2   IoU  IoUc   L_prior    L_bic   structure
-     595   2  0.0402  0.1882 +0.67  0.75  0.80   -1507.4  -1578.3   +90 +180 -270
-    3006   1  0.0380  0.2005 +0.63  0.76  0.86   -1577.4  -1617.2   -135 ^ -90
-    3158   6  0.0448  0.1876 +0.58  0.71  0.80   -1509.2  -1520.8   -270 +360 -45
-    3598   3  0.1135  0.2227 -0.09  0.54  0.55   -1072.4  -1056.2   -360 ^ -180
-   10456   2  0.0267  0.1303 +0.71  0.75  0.69   -1753.7  -1786.8   +45 +360 +135
-   12423   1  0.0395  0.2023 +0.63  0.79  0.80   -1593.7  -1588.5   - +180 +45
-   12673   4  0.0184  0.0842 +0.74  0.72  0.78   -1956.0  -1977.7   +90 +270 +90
-   15303   8  0.0370  0.1379 +0.61  0.69  0.87   -1640.5  -1618.5   -360 -180 +270
-   15508   0  0.0568  0.1265 +0.36  0.51  0.65   -1262.8  -1410.8   -90 ^ -360
-   18275   5  0.0511  0.1332 +0.43  0.58  0.73   -1367.3  -1455.8   -270 +180 -
+     595   2  0.0401  0.1882 +0.67  0.75  0.80   -1431.1  -1579.2   +90 +180 -270
+    3006   1  0.0393  0.2005 +0.62  0.76  0.86   -1538.0  -1601.1   -90 ^ -90
+    3158   6  0.0447  0.1876 +0.58  0.71  0.80   -1451.5  -1521.6   -270 +360 -45
+    3598   3  0.1045  0.2227 +0.00  0.53  0.52   -1028.2  -1097.7   +270 ^ -135
+   10456   2  0.0267  0.1303 +0.71  0.73  0.68   -1699.8  -1788.8   -90 -180 -45
+   12423   1  0.0378  0.2023 +0.65  0.80  0.81   -1578.0  -1609.7   +90 +135 +135
+   12673   4  0.0183  0.0842 +0.74  0.74  0.80   -1923.7  -1980.6   +90 +180 +45
+   15303   8  0.0378  0.1379 +0.60  0.67  0.84   -1628.5  -1608.0   -360 +135 +270
+   15508   0  0.0738  0.1265 +0.16  0.41  0.73   -1230.7  -1274.8   -270 ^ +360
+   18275   5  0.0607  0.1332 +0.32  0.52  0.76   -1341.0  -1367.7   -180 -135 +180
+   20429   1  0.0475  0.1953 +0.55  0.76  0.73   -1511.3  -1507.3   - (-90) -
+   24143   1  0.0555  0.2148 +0.41  0.33  0.28   -1275.5  -1423.7   -90 ^ -90
 
-                      Search beats the hand-written gate on every number,
-                      compared LIKE FOR LIKE on these same 10 crops (the
-                      gate's headline 0.60 / 0.71 is over 12, and the two
-                      missing crops include its worst): IoU median 0.71
-                      against 0.60, centred 0.79 against 0.74, R^2 +0.62
-                      against +0.41, >= 0.5 on 10/10 and 10/10 against 9/10
-                      and 8/10.  Per crop it is 10 out of 10 on mse, not a
-                      median effect.  Blank still beats the fit on 0/10.  Crop 3598 is the one failure, R^2 -0.09: a
-                      low-contrast "33" where the program drew a circle and
-                      an arc over the wrong digit.
+                      Search beats the hand-written gate, now LIKE FOR LIKE
+                      on all 12 rather than on a salvaged 10: IoU median
+                      0.72 against 0.60, centred 0.78 against 0.71, R^2
+                      +0.59 against +0.41, >= 0.5 on 10/12 and 11/12 against
+                      10/12 and 9/12.  Per crop it is 11 of 12 on mse.  The
+                      exception is 18275, where the gate fits BETTER (0.0592
+                      against 0.0607) and still loses on MDL -- the winner is
+                      not the lowest-mse program, which is the scoring
+                      working as intended rather than a defect.  Blank beats
+                      the fit on 0/12.
+
+                      Crop 3598 remains the one failure, R^2 +0.00 on a
+                      low-contrast "33": the program explains none of the
+                      variance, and 24143's IoU 0.33 is the other weak one.
+
+                      THE QUESTION THE KILLED RUN COULD NOT ANSWER, now
+                      measured: BIC and the prior term rank the same
+                      structure first on only 2 of 12.  They disagree on 10.
+                      That is the prediction 3a made -- the prior's parameter
+                      term is a log density, not a code length, so it rewards
+                      extra freedom, and against a texture floor almost any
+                      extra slot buys enough mse to pay for itself.  On
+                      noiseless targets the two agree (3a 7/8 and 7/8, 3a-wide
+                      6/6 and 6/6) because the true structure reaches zero.
+                      So the disagreement is entirely a real-image effect and
+                      the choice between them is not decorative: it is the
+                      open question this table hands to step 8.
 
                       EVERY winner uses all 3 moves, so the cap is binding
                       and this table is a lower bound -- <= 4 moves would
-                      win again.  That is the data term dominating, as 3a
-                      measured: a move costs +3.2 nats under the prior and
-                      repays it with 0.62% of mse.
-
-                      What was lost with the run and is NOT recoverable from
-                      the winners: whether BIC and the prior term rank the
-                      same structure first.  The two differ by a mean 37
-                      nats on the winners alone -- the same order as the 78
-                      nats between competing structures -- so they can
-                      disagree, and the question stands.  Re-measuring it
-                      costs ~15 min per crop.
-
-                      Refit noise, re-measured here on 10 crops rather than
-                      1: nine agree to within 1.3 nats, and crop 18275 came
-                      back 13% BETTER (72 nats) from a different seed.  So
-                      the earlier "0 to 2 nats" was optimistic; the drift is
-                      usually negligible but has a tail big enough to flip a
-                      ranking, and it is an UNDER-fit, not noise in both
-                      directions.
+                      win again.
 
     4  data.py     prefix batches + IoU-to-go targets, from the sampler.
                    DONE.  One example per PREFIX, so a 5-move program is 6
@@ -777,8 +805,13 @@ compare against.
                    A tempting wrong fix, recorded because it looked right:
                    score recovery up to the mirror (negate every angle),
                    since the misses were `+180` for `-180`.  Measured, the
-                   mirror is NOT an equivalence -- median mse ratio 2.7, and
-                   `+45 -270` mirrors to something 157000x worse.  It only
+                   mirror is not an equivalence IN GENERAL -- `+45 -270`
+                   mirrors to something 157000x worse, `-90 -` to 2800x.
+                   The moderate ratios in that same measurement (2.7, 4.6)
+                   prove nothing, since they were taken at the unpolished
+                   budget and are the size of the slack itself; for a SINGLE
+                   arc the mirror genuinely is the same picture, which 3a's
+                   remaining miss shows.  It only
                    looked like one on the half-turns, where the mirror of a
                    semicircle IS a rotation of it, and there the mirror was
                    winning because the TRUE structure was under-fitted.  The
