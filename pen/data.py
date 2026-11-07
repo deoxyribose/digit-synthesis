@@ -52,10 +52,11 @@ canvas does not carry enough of the past and the policy will propose
 incoherent continuations.  That test is step 6, and this module is what makes
 it possible to run it before any policy exists.
 
-Usage: .venv/bin/python -m pen.data [n_prog] [seed]
+Usage: .venv/bin/python -m pen.data [n_examples] [seed]
 """
 
 import sys
+import time
 
 import numpy as np
 
@@ -74,11 +75,24 @@ NK, NA, NL = len(KINDS), len(PN.ANGLE), 8
 NCH = 5
 MODES = ("matched", "divergent", "unrelated")
 
-# Buckets are uniform in log SPAN, not in log arc length: span is what the
-# same number means for a line and for a loop (see `dsl.ext_frac`), and the
-# head's job is to land in the right basin, not to be exact.
-SPAN_LO, SPAN_HI = 0.30, 2.00             # x LREF, for draws
-HOP_LO, HOP_HI = 0.20, 1.00               # x HOPMAX, for lifts
+# Buckets are uniform in log span -- span and not arc length, so the same
+# number means the same thing for a line and for a loop (`dsl.ext_frac`) --
+# and ON THE PAGE, in pixels, not in pen units.
+#
+# That is the whole difference between a length head that works and one that
+# does not.  The pen's `log len` is in glyph units, and `scale_to_page` gives
+# the glyph a scale spanning 20x (sd 0.64 nats) so that every drawing fills
+# the page.  A bin is 1.27x wide, so the scale alone smears one picture over
+# ~13 bins of an 8-bin head: the label was not a function of what the network
+# could see, and it scored BELOW predicting the most common bucket (0.226
+# against 0.268).  In page pixels the label is visible, and `q_of` multiplies
+# the scale back in -- which the proposer knows, because the step-8 scene
+# head regresses the pose before the rollout starts.
+#
+# Ranges cover the 1st to 99th percentile of what the prior draws: 5.9 to
+# 66.2 px for a draw's span, 1.1 to 19.5 px for a hop.
+SPAN_LO, SPAN_HI = 6.0, 66.0              # px on the page, for draws
+HOP_LO, HOP_HI = 1.0, 20.0                # px on the page, for lifts
 DOT_SD = 2.0                              # px, the pen-position blob
 
 # One float per angle, as `dsl.MU_LEN_OF` is: ext_frac is a jnp function and
@@ -87,10 +101,14 @@ EXT_OF = {a: float(PN.ext_frac(PN.ANGLE[a] * np.pi)) for a in PN.ANGLE}
 
 
 def edges(cfg=CFG):
-    """(draw bin edges, lift bin edges) in pixels."""
+    """(draw bin edges, lift bin edges), page pixels."""
     ln = lambda lo, hi: np.exp(np.linspace(np.log(lo), np.log(hi), NL + 1))
-    return (ln(SPAN_LO * cfg.LREF, SPAN_HI * cfg.LREF),
-            ln(HOP_LO * cfg.HOPMAX, HOP_HI * cfg.HOPMAX))
+    return ln(SPAN_LO, SPAN_HI), ln(HOP_LO, HOP_HI)
+
+
+def scale_of(p, cfg=CFG):
+    """The glyph scale, which turns pen units into page pixels."""
+    return np.exp(np.asarray(p)[..., cfg.NMOVE * PN.NP + PN.GI['log s']])
 
 
 def bucket(v, e):
@@ -102,18 +120,21 @@ def centre(k, e):
     return float(np.sqrt(e[k] * e[k + 1]))
 
 
-def q_of(k, a, cfg=CFG):
-    """Bucket -> the `log len` parameter Adam starts from.
+def q_of(k, a, s, cfg=CFG):
+    """Bucket -> the `log len` parameter Adam starts from, at glyph scale `s`.
 
     The inverse of the bucketing, and the only place the proposer touches a
     continuous number: it picks a bin, this turns the bin into an init, and
-    gradient descent does the rest.
+    gradient descent does the rest.  `s` comes from the pose, which the scene
+    head supplies before the rollout -- the same assumption `data` already
+    makes about the canvas.
     """
     ed, eh = edges(cfg)
     if a is None:                                     # a lift
-        d = min(max(centre(k, eh), 1e-3), cfg.HOPMAX - 1e-3)
+        d = centre(k, eh) / s
+        d = min(max(d, 1e-3), cfg.HOPMAX - 1e-3)
         return float(np.log(d / (cfg.HOPMAX - d)))    # logit, `path` sigmoids
-    return float(np.log(centre(k, ed) / (cfg.LREF * EXT_OF[a])))
+    return float(np.log(centre(k, ed) / (s * cfg.LREF * EXT_OF[a])))
 
 
 def actions(prog, p, cfg=CFG):
@@ -125,15 +146,18 @@ def actions(prog, p, cfg=CFG):
     instead of as a plausible wrong label.
     """
     ed, eh = edges(cfg)
+    s = float(scale_of(p, cfg))
     out = []
     for i, m in enumerate(prog):
         k, q = PN.kind(m), float(p[i * PN.NP])
         if k == "d":
-            out.append((KI["d"], AI[m[1]], bucket(cfg.LREF * np.exp(q) * EXT_OF[m[1]], ed)))
+            out.append((KI["d"], AI[m[1]],
+                        bucket(s * cfg.LREF * np.exp(q) * EXT_OF[m[1]], ed)))
         elif k == "t":
             out.append((KI["t"], AI[m[1]], -1))
         else:
-            out.append((KI["h"], -1, bucket(cfg.HOPMAX / (1.0 + np.exp(-q)), eh)))
+            out.append((KI["h"], -1,
+                        bucket(s * cfg.HOPMAX / (1.0 + np.exp(-q)), eh)))
     out.append((KI["s"], -1, -1))
     return np.array(out, np.int32)
 
@@ -225,26 +249,38 @@ def channels(tgt, canvas, tip, hd, cfg=CFG):
                      np.sin(hd)[:, None, None] * one], 1)
 
 
-def batch(rng, n_prog=64, cfg=CFG, mix=(0.4, 0.4, 0.2)):
-    """One training batch: every prefix of `n_prog` sampled programs.
+def batch(rng, n_prog=96, n_ex=512, cfg=CFG, mix=(0.4, 0.4, 0.2)):
+    """`n_ex` prefix examples drawn from `n_prog` sampled programs.
 
-    Rendering is batched three times -- the prefixes, the generators' finished
-    drawings, and the divergent targets -- rather than once per example, for
-    the reason `fit.run` gives: a new shape is a new XLA compile.
+    EVERY SHAPE HERE IS FIXED, which is the difference between 23 s a batch
+    and 0.1 s.  Programs have different lengths, so the number of prefixes
+    they offer varies -- and a varying example count is a new XLA shape on
+    every call, i.e. a fresh compile of the renderer each time, which costs
+    more than the batch it serves (the same trap `fit.run` balances chunks
+    for).  So the count of examples is fixed and a subset is drawn, and the
+    per-mode counts are fixed too, since `tgt[mode == 1]` is a shape as well.
+
+    Rendering is batched three times -- the prefixes, the generators'
+    finished drawings, the divergent targets -- never once per example.
     """
     progs, p = corpus(rng, n_prog, cfg)
     full = render(progs, p, cfg)                        # the generators, finished
     full32 = render(progs, p, cfg, down=2)
 
-    ip = np.concatenate([[i] * (len(q) + 1) for i, q in enumerate(progs)])
-    ts = np.concatenate([np.arange(len(q) + 1) for q in progs])
-    e = len(ts)
+    ia = np.concatenate([[i] * (len(q) + 1) for i, q in enumerate(progs)])
+    ta = np.concatenate([np.arange(len(q) + 1) for q in progs])
+    pick = rng.choice(len(ta), n_ex, replace=len(ta) < n_ex)
+    ip, ts, e = ia[pick], ta[pick], n_ex
     pe, ge = p[ip], [progs[i] for i in ip]
     canvas = render(ge, pe, cfg, sel=_sel(ge, ts, cfg))
     tipa, hda = state(progs, p, cfg)
     tip, hd = tipa[ip, ts], hda[ip, ts]
 
-    mode = rng.choice(len(MODES), e, p=np.asarray(mix) / np.sum(mix))
+    k = np.asarray(mix, np.float64) / np.sum(mix)
+    cnt = np.floor(k * e).astype(int)
+    cnt[0] += e - cnt.sum()                             # fixed, not sampled
+    mode = np.repeat(np.arange(len(MODES)), cnt)
+    rng.shuffle(mode)
     tgt = full[ip].copy()
     tgt32 = full32[ip].copy()
 
@@ -289,12 +325,17 @@ def _lastpar(b):
 
 
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 64
+    n = int(sys.argv[1]) if len(sys.argv) > 1 else 512
     seed = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     rng = np.random.default_rng(seed)
-    b = batch(rng, n)
+    t0 = time.time()
+    b = batch(rng, n_ex=n)
+    first = time.time() - t0
+    t0 = time.time()
+    b = batch(rng, n_ex=n)
     e = len(b["val"])
-    print(f"{n} programs -> {e} examples, {e / n:.1f} decisions per program")
+    print(f"{e} examples: {first:.1f}s cold, {time.time() - t0:.2f}s warm "
+          f"({e / (time.time() - t0):.0f} examples/s)")
     print(f"x {b['x'].shape} {b['x'].dtype}, "
           f"{b['x'].nbytes / 2 ** 20:.0f} MiB per batch")
 

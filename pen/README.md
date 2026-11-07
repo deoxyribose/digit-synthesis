@@ -378,7 +378,50 @@ It is also a dependency of steps 4 and 5: the value target is an IoU, which
 needs fits, and "did the search work" has no answer without enumeration to
 compare against.
 
-    1  dsl.py, check.py, sample.py                    done
+    1  dsl.py, check.py, sample.py                    done, and corrected
+                   once more at step 6: `cost` was not a density.  Shrink
+                   NMOVE until the whole space enumerates and the prior's
+                   total mass must be exactly 1 -- it was 0.4957 at NMOVE 3,
+                   1.1103 at 4, 1.4410 at 5, three separate places where the
+                   sampler and its density disagreed:
+
+                     * a FORCED stop priced as a chosen one.  `sample_struct`
+                       breaks when the next group will not fit; `cost` still
+                       charged -log(P_STOP).  The right term is P_STOP +
+                       (1 - P_STOP) P(the group does not fit), and a 3-move
+                       program at NMOVE 3 came out 3.34x too unlikely, which
+                       is 1 / P_STOP exactly
+                     * `legal` accepted hop/turn ORDERINGS the sampler never
+                       emitted.  Turning before a hop aims the hop, turning
+                       after it aims the next stroke, and they start the next
+                       stroke in different places -- so these are different
+                       drawings, not a canonical form
+                     * and two turns in one group (`- (-90) ^ (-90) -`),
+                       which needs five moves to appear at all, which is why
+                       only NMOVE 5 showed it
+
+                   Fixed at the root rather than in `cost` a third time: a
+                   stroke boundary is (turn?, hop, turn?) in the sampler AND
+                   in `legal`, both turn slots independent, one pen-up per
+                   gap.  Mass is now 1.000000 at NMOVE 3, 4 and 5 with zero
+                   illegal samples, and `check.py` carries that by
+                   enumeration -- the old Monte-Carlo version could not see
+                   any of it, because at NMOVE 12 only programs of 10+ moves
+                   are affected and no frequency test on common structures
+                   reaches them.
+
+                   `structures(<= 3)` is still exactly 3705 and step 3's
+                   rankings stand; a program containing `^` costs +0.6
+                   structure nats more under the corrected prior, against 78
+                   nats between rival structures.
+
+                   What the prior actually draws, 40k samples: median 4
+                   moves, mean 4.83, and bimodal -- 30% are ONE stroke and
+                   13% are stopped by the NMOVE cap rather than by the stop
+                   rule.  Per program 2.98 draws, 1.17 turns, 0.67 hops,
+                   1.67 strokes.  Only 48% fall inside the <= 3-move space
+                   step 3 enumerated, which is worth remembering when the
+                   proposer is measured against that table.
     2  fit.py      batched Adam on the continuous parameters.  Then the
                    GATE, gate.py: hand-write one
                    program per digit for 12 polarity-matched SVHN crops and
@@ -572,12 +615,89 @@ compare against.
                    canvases are placed by the generator's own pose; at
                    inference nothing knows the pose until a one-shot head
                    regresses it.  Until then SMC has to be handed one.
-    5  net.py      the trunk and heads, hand-rolled Adam
-    6  train on synthetic only; report held-out action accuracy and value MSE.
-                   Train the VALUE HEAD FIRST and alone: if a Markov value
+    5  net.py      the trunk and heads, hand-rolled Adam.  DONE: 40,458
+                   parameters, no framework, one jit, 3.1 ms per step at
+                   batch 512 on the 3090 Ti.  Masked actions carry exactly
+                   0.0 probability, not merely a small one, and the model
+                   overfits a single batch to 1.00 on all three factors --
+                   the precondition for anything measured after it.
+
+                   The device changes the project's economics more than it
+                   changes this file: the FITTER went 130 ms to 20 ms per
+                   fit (gate wall 77 s -> 11 s, same numbers to the
+                   decimal), so the 3705-structure enumeration that took
+                   2 h 25 m is now about 22 minutes.
+
+                   A bigger bottleneck than the device was in `data.batch`:
+                   programs have different lengths, so every batch had a
+                   different example count, which is a new XLA shape and a
+                   fresh compile of the renderer on EVERY call -- 23 s a
+                   batch against 3 ms of training.  Fixing the example count
+                   and the per-mode counts took it to 0.38 s warm, 1332
+                   examples/s.  Same trap `fit.run` balances chunks for.
+    6  train.py    synthetic only; held-out action accuracy and value MSE.
+                   The VALUE HEAD FIRST and alone, because if a Markov value
                    cannot separate good prefixes from bad, a Markov policy
-                   will not either, and that is risk 2 settled for the price
-                   of one head.
+                   will not propose coherent continuations either -- risk 2
+                   settled for the price of one head.
+
+                   6a value alone, 4000 steps, 166 s.  RISK 2 DOES NOT BITE.
+                      On 2048 held-out examples: mse 0.0082, correlation
+                      +0.966, mean predicted value 0.988 matched / 0.452
+                      divergent / 0.304 unrelated.
+
+                          ranks matched above divergent   0.933
+                          the same statistic on TRUE IoU  0.963   (97% of it)
+                          ranks matched above unrelated   0.998  (ceiling 1.000)
+
+                      The ceiling is the point.  It is below 1.0 because two
+                      completions of one prefix sometimes draw nearly the
+                      same picture, so an AUC reported against 1.0 would
+                      charge the model for an ambiguity in the DATA.  The
+                      Markov state carries 97% of what is there to carry.
+
+                   6b all four heads, 4000 steps.  Value mse 0.0212, r
+                      +0.910, AUC 0.903 against the same 0.963 ceiling --
+                      the policy costs the value about 3 points of shared
+                      capacity.  Action accuracy, against the control that
+                      matters:
+
+                                    net    prior alone    gain
+                          kind     0.860      0.513      +0.347
+                          angle    0.428      0.169      +0.259
+                          length   0.349      0.195      +0.154
+
+                      The control is the most frequent action among the
+                      LEGAL ones, with no image at all.  It already knows
+                      the grammar and the prior's skew, so beating chance
+                      means nothing and beating this means something.  It is
+                      also what found the two bugs below, both of which left
+                      a head looking merely weak.
+
+                      BUG 1, the policy was trained on noise.  60% of
+                      examples carry a divergent or unrelated target, which
+                      the VALUE head needs -- with matched targets alone
+                      every label is 1.0 -- but the POLICY must never see:
+                      the action label is the move the generator made, and
+                      against a target that generator did not draw it is not
+                      the right answer to the question being asked.  Masking
+                      the policy loss to matched targets: kind 0.767 ->
+                      0.84, angle 0.315 -> 0.42.
+
+                      BUG 2, the length label was not a function of anything
+                      the network could see.  `log len` is in GLYPH units and
+                      `scale_to_page` gives each drawing its own scale so it
+                      fills the page -- 20x spread, sd 0.64 nats, against
+                      bins 1.27x wide, so the scale alone smeared one picture
+                      over ~13 bins of an 8-bin head.  Length scored BELOW
+                      the control (0.226 against 0.268): not a weak head, an
+                      unlearnable target.  Bucketing PAGE PIXELS instead (6
+                      to 66 px for a draw's span, 1 to 20 px for a hop, the
+                      1st to 99th percentile of what the prior draws) and
+                      multiplying the scale back in inside `q_of` -- which
+                      the proposer may do, because the scene head regresses
+                      the pose before the rollout starts.  0.226 -> 0.349
+                      against a 0.195 control.
     7  smc.py      particles + resampling, measured against step 3
     8  scene.py    the colour/blur/background layer and its one-shot head (new)
     9  SVHN, and the domain gap measured rather than assumed

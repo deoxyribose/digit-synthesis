@@ -287,5 +287,27 @@ se = np.sqrt(emp * (1 - emp) / 40000)
 chk("prior: cost integrates to the sampler's mass", abs(mass - emp) / se, 4.0,
     "sigma")
 
+# 14 -- the same claim without Monte Carlo, and far stronger.  Shrink NMOVE so
+#       the whole space is enumerable, and the prior's total mass must be
+#       exactly 1: every legal program has to be reachable by the sampler and
+#       priced for.  This is what caught three separate leaks -- a forced stop
+#       at the cap charged as a chosen one (mass 0.50 at NMOVE 3), an ordering
+#       of hop and turn the sampler never emitted (1.11 at 4), and a second
+#       turn in one group that it could not emit either (1.44 at 5).
+for nm in (3, 4):
+    c = PN.Pen(NMOVE=nm)
+    zz = np.zeros(PN.nparam(c), np.float32)
+    m = sum(float(np.exp(-PN.cost(pr, zz, c)[0])) for pr in PN.structures(c, nm))
+    chk(f"prior: mass over every legal program, NMOVE={nm}", abs(m - 1.0),
+        1e-9, "")
+
+# 15 -- and the support matches in the other direction: nothing the sampler
+#       emits may be illegal, or `legal` is narrower than the prior and the
+#       enumeration would be searching a space the proposer never sees.
+for nm in (3, 5, 12):
+    c = PN.Pen(NMOVE=nm)
+    bad = sum(not PN.legal(PN.sample_struct(RNG, c), c) for _ in range(20000))
+    chk(f"prior: every sample is legal, NMOVE={nm}", float(bad), 0.0, "progs")
+
 print()
 print("FAILED: " + ", ".join(FAIL) if FAIL else "all invariants hold")

@@ -169,6 +169,14 @@ def kind(m):
     return m[0]
 
 
+def _gap(prog, i):
+    """The moves since the last draw before position `i`."""
+    j = i
+    while j and kind(prog[j - 1]) != "d":
+        j -= 1
+    return prog[j:i]
+
+
 def legal(prog, cfg=PEN):
     """Canonical form.  Each rule deletes a redundancy, never a drawing.
 
@@ -176,7 +184,11 @@ def legal(prog, cfg=PEN):
       is absorbed by `phi0`, a leading hop by `tx, ty`, and a trailing turn or
       hop moves a pen that never comes down again
     * no two turns in a row: one turn through the sum draws the same thing
-    * no two hops in a row: one longer hop does
+    * at most ONE hop between consecutive draws, which subsumes "no two hops
+      in a row": a pen-up path of several legs is one hop in some direction
+      plus the turns around it, and the alternatives differ only in reaching
+      further than HOPMAX.  This is also exactly what `sample_struct` emits,
+      so the prior covers every legal program -- see P_SPIN above
     * no two straight draws in a row with nothing between them: that is one
       longer straight.  (Two *arcs* in a row are not redundant -- different
       lengths give different radii.)
@@ -187,7 +199,7 @@ def legal(prog, cfg=PEN):
         return False
     for i, m in enumerate(prog):
         if kind(m) == "h":
-            if kind(prog[i - 1]) == "h":
+            if any(kind(q) == "h" for q in _gap(prog, i)):
                 return False
         elif kind(m) == "t":
             if m[1] not in SPINS or kind(prog[i - 1]) == "t":
@@ -486,6 +498,15 @@ def pose(p, enc, cfg=PEN):
 P_STOP = 0.30                    # stop after this draw
 P_HOP = 0.35                     # else: lift and start a new stroke
 P_SPIN = 0.45                    # and turn in place before the next draw
+# A stroke boundary is (turn?, hop, turn?) or just (turn?).  Both turn slots
+# exist because a hop travels along the CURRENT heading: turning before it
+# chooses WHERE the next stroke starts, turning after it chooses which way the
+# pen then faces, and only having both makes those two independent.  The
+# sampler used to emit one turn, always after the hop, while `legal` accepted
+# every ordering -- so `cost` handed probability to drawings the prior could
+# not produce, and stopped being a density: mass 1.11 at NMOVE = 4, 1.44 at 5.
+# `legal` now admits exactly what the sampler emits, which is the invariant
+# `check.py` tests by enumeration.
 W_DRAW = {"0": 3.0, "+45": 1.0, "-45": 1.0, "+90": 2.0, "-90": 2.0,
           "+135": 0.8, "-135": 0.8, "+180": 1.5, "-180": 1.5,
           "+270": 0.6, "-270": 0.6, "+360": 0.35, "-360": 0.35}
@@ -524,6 +545,34 @@ def _norm(w):
 
 
 DP, SP = _norm(W_DRAW), _norm(W_SPIN)
+
+
+# How many moves a stroke boundary plus its draw takes: 1 + hop + up to two
+# turns, which is where the cap bites.  Derived from the three constants
+# rather than written out, so changing one of them cannot leave this behind.
+GSIZE = {1: (1 - P_HOP) * (1 - P_SPIN),
+         2: (1 - P_HOP) * P_SPIN + P_HOP * (1 - P_SPIN) ** 2,
+         3: P_HOP * 2 * P_SPIN * (1 - P_SPIN),
+         4: P_HOP * P_SPIN ** 2}
+
+
+def p_end(n, cfg=PEN):
+    """P(the program ends after `n` moves), which is NOT P_STOP at the cap.
+
+    `sample_struct` stops two ways: the stop test fires, or the group it just
+    drew would not fit in NMOVE and it breaks.  Pricing only the first charges
+    a forced ending as though it had been chosen -- measured at NMOVE = 3,
+    where the cap binds constantly, `cost` accounted for 0.4957 of the mass
+    and a 3-move program came out 3.34x too unlikely, which is exactly
+    1 / P_STOP.  The sampler does not resample a group that does not fit, so
+    the groups that DO fit keep their own probabilities unrenormalised and
+    the whole correction lands here.
+
+    With three or more slots free every group fits and this is P_STOP again,
+    so nothing about short programs changes.
+    """
+    over = sum(v for k, v in GSIZE.items() if k > cfg.NMOVE - n)
+    return P_STOP + (1.0 - P_STOP) * over
 
 
 def groups(prog):
@@ -606,10 +655,13 @@ def sample_struct(rng, cfg=PEN, prog=()):
         if rng.random() < P_STOP:
             break
         nxt = []
-        if rng.random() < P_HOP:
+        hop = rng.random() < P_HOP
+        if hop:
+            if rng.random() < P_SPIN:
+                nxt.append(spin(_pick(rng, SP)))      # aim the hop
             nxt.append(HOP)
         if rng.random() < P_SPIN:
-            nxt.append(spin(_pick(rng, SP)))
+            nxt.append(spin(_pick(rng, SP)))          # aim the next stroke
         nxt.append(draw(_pick(rng, DP, _bare_drop(prog, nxt))))
         if len(prog) + len(nxt) > cfg.NMOVE:
             break
@@ -649,15 +701,18 @@ def cost(prog, p, cfg=PEN):
         nxt = [m for m in g if kind(m) != "d"]
         ls -= np.log(1.0 - P_STOP)
         ls -= np.log(P_HOP if "h" in kinds else 1.0 - P_HOP)
-        if "t" in kinds:
-            ls -= np.log(P_SPIN) + np.log(SP[[m for m in g if kind(m) == "t"][0][1]])
-        else:
-            ls -= np.log(1.0 - P_SPIN)
+        # one turn slot, or two around a hop.  `slots` is the group split at
+        # its hop, so each side is priced by the same Bernoulli.
+        hi = kinds.index("h") if "h" in kinds else len(g)
+        for side in (g[:hi], g[hi:]) if "h" in kinds else (g,):
+            t = [m for m in side if kind(m) == "t"]
+            ls -= (np.log(P_SPIN) + np.log(SP[t[0][1]]) if t
+                   else np.log(1.0 - P_SPIN))
         drop = _bare_drop(done, nxt)
         tot = sum(v for k, v in DP.items() if k not in drop)
         ls -= np.log(DP[g[-1][1]] / tot)
         done += list(g)
-    ls -= np.log(P_STOP)
+    ls -= np.log(p_end(len(prog), cfg))
 
     def gauss(x, mu, sd):
         return 0.5 * ((x - mu) / sd) ** 2 + np.log(sd * np.sqrt(2 * np.pi))
