@@ -503,11 +503,14 @@ compare against.
    15508   0  0.0568  0.1265 +0.36  0.51  0.65   -1262.8  -1410.8   -90 ^ -360
    18275   5  0.0511  0.1332 +0.43  0.58  0.73   -1367.3  -1455.8   -270 +180 -
 
-                      Search beats the hand-written gate on every number:
-                      IoU median 0.71 / 0.79 against 0.60 / 0.71, >= 0.5 on
-                      10/10 and 10/10 against 10/12 and 9/12, R^2 median
-                      +0.62 against +0.41.  Blank still beats the fit on
-                      0/10.  Crop 3598 is the one failure, R^2 -0.09: a
+                      Search beats the hand-written gate on every number,
+                      compared LIKE FOR LIKE on these same 10 crops (the
+                      gate's headline 0.60 / 0.71 is over 12, and the two
+                      missing crops include its worst): IoU median 0.71
+                      against 0.60, centred 0.79 against 0.74, R^2 +0.62
+                      against +0.41, >= 0.5 on 10/10 and 10/10 against 9/10
+                      and 8/10.  Per crop it is 10 out of 10 on mse, not a
+                      median effect.  Blank still beats the fit on 0/10.  Crop 3598 is the one failure, R^2 -0.09: a
                       low-contrast "33" where the program drew a circle and
                       an arc over the wrong digit.
 
