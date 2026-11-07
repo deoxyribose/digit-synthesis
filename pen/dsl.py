@@ -387,41 +387,80 @@ def weights(P, enc):
     return w * (enc["down"] * enc["live"])[..., None]
 
 
-def place(P, w, p, cfg=PEN):
-    """Glyph similarity: slant, scale, then put the drawing's centre of ink at
-    tx, ty.
+def _lin(P, p, cfg):
+    """The linear half of `place`: aspect, slant, scale.  Separate because
+    the origin of the page frame is needed without the ink that fixes it."""
+    g = p[:, cfg.NMOVE * NP:]
+    x, y = P[..., 0], P[..., 1]
+    # Aspect and slant are PAGE properties, like condensed or italic type: a
+    # narrow digit is narrow on the page whichever way the pen was moving.
+    # Bounded hard by tanh rather than priced -- unbounded anisotropy is a
+    # shape change in disguise, and at log a = 2 a loop is a line and the
+    # alphabet has quietly collapsed.
+    asp = jnp.exp(cfg.ASPECT * jnp.tanh(g[:, GI['log a']]))[:, None, None]
+    x, y = x * asp, y / asp
+    x = x + cfg.SLANT * jnp.tanh(g[:, GI['slant']])[:, None, None] * y
+    s = jnp.exp(g[:, GI['log s']])[:, None, None]
+    return s * x, s * y, s
 
-    Anchoring on the inked centroid rather than the pen's start point is what
-    makes tx, ty mean "where the drawing is".  Anchored at the start, every
-    length change would drag the whole glyph across the canvas and the fit
-    would fight itself.  The glyph scale and the per-move lengths are
-    deliberately redundant -- one overall size, and relative lengths priced
-    around 1 -- which is the same split BPL uses.
+
+def _origin(x, y, w, p, cfg):
+    """Where the pen's start lands on the page, (b, 1, 1) each.
+
+    Anchoring on the inked centroid rather than the start point is what makes
+    tx, ty mean "where the drawing is".  Anchored at the start, every length
+    change would drag the whole glyph across the canvas and the fit would
+    fight itself.  The glyph scale and the per-move lengths are deliberately
+    redundant -- one overall size, relative lengths priced around 1 -- which
+    is the same split BPL uses.
+    """
+    g = p[:, cfg.NMOVE * NP:]
+    W = w / jnp.sum(w, (1, 2), keepdims=True).clip(1e-6)
+    mid = 0.5 * cfg.H
+    return (mid - jnp.sum(W * x, (1, 2), keepdims=True)
+            + cfg.TRANS * g[:, GI['tx']][:, None, None],
+            mid - jnp.sum(W * y, (1, 2), keepdims=True)
+            + cfg.TRANS * g[:, GI['ty']][:, None, None])
+
+
+def place(P, w, p, cfg=PEN, anchor=None):
+    """Glyph similarity, then put the drawing where it goes.
+
+    Two ways to say where, and they are the same placement said differently.
+    `anchor=None` is the finished-program form: the ink's centroid goes to
+    tx, ty (see `_origin`).  An explicit anchor is the ROLLOUT form: the pen
+    starts at that page point and walks.  A rollout cannot use the first --
+    the centroid of the whole drawing is not known until the drawing is
+    finished, so half a program would re-centre itself on the page at every
+    move -- and `origin` converts one into the other exactly.
 
     The slant is applied in the PAGE frame, so it does not rotate with the
     glyph.  That is what slant means in type, and what plate perspective does
     to a photographed number; it is also the one reason `phi0` is not an
     exactly rigid rotation of the rendered glyph.
     """
-    g = p[:, cfg.NMOVE * NP:]
-    x, y = P[..., 0], P[..., 1]
-    # Aspect and slant are PAGE properties, like condensed or italic type: a
-    # narrow digit is narrow on the page whichever way the pen was moving.
-    # Bounded hard by tanh rather than priced, for the reason A_MAX exists in
-    # the earlier A_MAX -- unbounded anisotropy is a shape change in disguise, and at
-    # log a = 2 a loop is a line and the alphabet has quietly collapsed.
-    asp = jnp.exp(cfg.ASPECT * jnp.tanh(g[:, GI['log a']]))[:, None, None]
-    x, y = x * asp, y / asp
-    x = x + cfg.SLANT * jnp.tanh(g[:, GI['slant']])[:, None, None] * y
-    s = jnp.exp(g[:, GI['log s']])[:, None, None]
-    x, y = s * x, s * y
-    W = w / jnp.sum(w, (1, 2), keepdims=True).clip(1e-6)
-    cx = jnp.sum(W * x, (1, 2), keepdims=True)
-    cy = jnp.sum(W * y, (1, 2), keepdims=True)
-    mid = 0.5 * cfg.H
-    x = x - cx + mid + cfg.TRANS * g[:, GI['tx']][:, None, None]
-    y = y - cy + mid + cfg.TRANS * g[:, GI['ty']][:, None, None]
-    return jnp.stack([x, y], -1), w * s
+    x, y, s = _lin(P, p, cfg)
+    if anchor is None:
+        ox, oy = _origin(x, y, w, p, cfg)
+    else:
+        a = jnp.asarray(anchor)
+        ox, oy = a[:, 0][:, None, None], a[:, 1][:, None, None]
+    return jnp.stack([x + ox, y + oy], -1), w * s
+
+
+def origin(p, enc, cfg=PEN):
+    """The page point `place` starts the pen at, (b, 2).
+
+    What a rollout needs up front and what a finished program implies.  Exact
+    rather than extrapolated from the first sample: `path` begins at
+    u = 1/SPS, and walking back one sample is wrong by the move's curvature
+    over that step -- 0.25 alpha at a stroke edge, measured.
+    """
+    P = path(p, enc, cfg)
+    w = weights(P, enc)
+    x, y, _ = _lin(P, p, cfg)
+    ox, oy = _origin(x, y, w, p, cfg)
+    return jnp.concatenate([ox[:, :, 0], oy[:, :, 0]], 1)
 
 
 def tau(P, w, sig, cfg=PEN):
@@ -434,7 +473,7 @@ def tau(P, w, sig, cfg=PEN):
     return jnp.einsum("bsh,bsw->bhw", ey, ex, precision=jax.lax.Precision.HIGHEST)
 
 
-def alpha(p, enc, cfg=PEN, down=1, sel=None):
+def alpha(p, enc, cfg=PEN, down=1, sel=None, anchor=None):
     """Coverage in [0, 1] at H/down.  One pen for the whole glyph.
 
     `sel` is an optional (b, NMOVE) multiplier on the ink, applied AFTER
@@ -444,7 +483,7 @@ def alpha(p, enc, cfg=PEN, down=1, sel=None):
     """
     P = path(p, enc, cfg)
     w = weights(P, enc)
-    P, w = place(P, w, p, cfg)
+    P, w = place(P, w, p, cfg, anchor)
     if sel is not None:
         w = w * sel[..., None]
     sig = cfg.SIGMA * jnp.exp(p[:, cfg.NMOVE * NP + GI['log w']])

@@ -196,7 +196,7 @@ def loss(w, b, use=(1.0, 1.0, 1.0, 1.0)):
     """
     lk, la, ll, v = forward(w, b)
     a = b["act"]
-    m = (b["mode"] == 0).astype(lk.dtype)        # matched targets only
+    m = (b["mode"] != 2).astype(lk.dtype)        # matched and divergent
     pk = _xent(lk, a[:, 0], m)
     pa = _xent(la, a[:, 1], m)
     pl = _xent(ll, a[:, 2], m)
@@ -216,7 +216,7 @@ def accuracy(w, b):
     a = b["act"]
     out = []
     for lg, y in ((lk, a[:, 0]), (la, a[:, 1]), (ll, a[:, 2])):
-        ok = (y >= 0) & (b["mode"] == 0)
+        ok = (y >= 0) & (b["mode"] != 2)
         out.append(float((lg.argmax(1)[ok] == y[ok]).mean()))
     vv, tv = np.asarray(v), np.asarray(b["val"])
     out += [float(np.mean((vv - tv) ** 2)),

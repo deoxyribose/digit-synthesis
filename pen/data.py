@@ -288,6 +288,7 @@ def batch(rng, n_prog=96, n_ex=512, cfg=CFG, mix=(0.4, 0.4, 0.2)):
     # and the shared moves' numbers, so the two drawings differ only where
     # the programs do.
     dv = np.flatnonzero(mode == 1)
+    dp, dq = [], None
     if len(dv):
         dp, dq = [], []
         for j in dv:
@@ -308,7 +309,16 @@ def batch(rng, n_prog=96, n_ex=512, cfg=CFG, mix=(0.4, 0.4, 0.2)):
         other = (ip[un] + rng.integers(1, n_prog, len(un))) % n_prog
         tgt[un], tgt32[un] = full[other], full32[other]
 
+    # The action label is "what did the program that drew THIS TARGET do
+    # next", and for a divergent example that is the ALTERNATIVE's move, not
+    # the generator's.  The two share the prefix, so the canvas, the pen and
+    # the legal set are identical and only the target differs -- which makes
+    # these the examples that force the policy to look at the target at all.
+    # Labelling them with the generator's move taught the opposite, and
+    # masking them out of the loss (the first fix) merely stopped the damage.
     act = np.stack([actions(ge[j], pe[j], cfg)[ts[j]] for j in range(e)])
+    for i, j in enumerate(dv):
+        act[j] = actions(dp[i], dq[i], cfg)[ts[j]]
     km, am, lm = zip(*[masks(ge[j][:ts[j]], cfg) for j in range(e)])
     val = PF.iou(full32[ip], tgt32).astype(np.float32)
     return dict(x=channels(tgt, canvas, tip, hd, cfg), tip=tip.astype(np.float32),

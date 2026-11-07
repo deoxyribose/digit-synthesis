@@ -301,6 +301,28 @@ for nm in (3, 4):
     chk(f"prior: mass over every legal program, NMOVE={nm}", abs(m - 1.0),
         1e-9, "")
 
+# 14b - the two placements in `place` are the same placement.  A rollout is
+#       start-anchored because the centroid of a drawing is not known until
+#       it is finished; training renders prefixes by masking ink after
+#       centroid placement.  If these disagreed, every canvas the proposer
+#       sees at inference would be shifted from the ones it was trained on.
+pr3, pp3 = [], []
+for _ in range(16):
+    q, pq = PN.sample(RNG, CFG)
+    pr3.append(q)
+    pp3.append(pq)
+pp3 = jnp.asarray(np.stack(pp3))
+e3 = PN.encode(pr3, CFG)
+org = PN.origin(pp3, e3, CFG)
+worst = 0.0
+for t in (1, 2, 3, CFG.NMOVE):
+    sel = np.zeros((len(pr3), CFG.NMOVE), np.float32)
+    sel[:, :t] = 1.0
+    a = PN.alpha(pp3, e3, CFG, sel=jnp.asarray(sel))
+    b = PN.alpha(pp3, PN.encode([q[:t] for q in pr3], CFG), CFG, anchor=org)
+    worst = max(worst, float(jnp.abs(a - b).max()))
+chk("place: start-anchored == centroid-placed", worst, 0.0, "alpha")
+
 # 15 -- and the support matches in the other direction: nothing the sampler
 #       emits may be illegal, or `legal` is narrower than the prior and the
 #       enumeration would be searching a space the proposer never sees.

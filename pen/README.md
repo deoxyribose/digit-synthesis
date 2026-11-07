@@ -698,7 +698,85 @@ compare against.
                       the proposer may do, because the scene head regresses
                       the pose before the rollout starts.  0.226 -> 0.349
                       against a 0.195 control.
-    7  smc.py      particles + resampling, measured against step 3
+    7  smc.py      particles + resampling, measured against step 3.  DONE,
+                   and it does not yet replace the enumeration.
+
+                   N particles draw one move at a time; the policy says
+                   what, the value head says which particles to keep
+                   (w ~ v, systematic resampling below half ESS), and the
+                   survivors go through step 3's own fitter and MDL, so the
+                   numbers compare.  A HEURISTIC TWIST, not an exact
+                   posterior: v is a regression on IoU, not an incremental
+                   likelihood ratio.
+
+                   The renderer needed one change.  A rollout cannot use
+                   centroid placement -- the centroid of a drawing is not
+                   known until it is finished, so half a program would slide
+                   across the page at every move -- so `place` also takes an
+                   explicit start point and `origin` converts between the
+                   two.  Exactly: 0.0 alpha against the training canvases,
+                   now an invariant, which is why no retraining was needed.
+                   Because the length buckets are in page pixels the glyph
+                   scale can be held at 1, so the pose reduces to (start
+                   point, heading) -- both unknown, so particles carry them.
+
+                   On 10 targets of <= 3 moves, the only regime where
+                   exhaustive search is feasible and so the only one with a
+                   ceiling to measure against:
+
+                       run          recovered   median mse    s/target
+                       prior            3/10     8.84e-06       11.5
+                       net              3/10     4.21e-06       10.7
+                       net+pose         4/10     5.39e-06       13.7
+                       enumerate        7/10          --        33
+
+                   So: 3x faster and recovers half as often.  The proposer
+                   beats the prior on FIT (2.1x lower mse) and ties it on
+                   RECOVERY, which is the honest summary -- it has learned
+                   to draw something that looks right, not yet to pick the
+                   right program.  Both recovery counts are conservative:
+                   the enumeration's three misses are mostly equivalences
+                   (`-180` for `+180` is the 180-degree rotation `phi0` can
+                   produce), as step 3 already documented.
+
+                   On full-length targets (6.3 moves on average) the picture
+                   is the same shape: recovery 2/6 against the prior's 0/6
+                   and 2.6x lower mse.
+
+                   TWO BUGS OF MINE ALONG THE WAY, both found by a control
+                   rather than by a crash.
+
+                   The policy was trained on the wrong labels.  A DIVERGENT
+                   example is a prefix shared by two programs shown against
+                   the target the other one drew -- identical canvas, pen and
+                   legal set, only the target differs -- so it is exactly the
+                   example that forces the policy to look at the target.
+                   Labelling it with the generator's next move teaches the
+                   opposite, and the first fix (masking them out of the loss)
+                   stopped the damage while throwing away the only examples
+                   that could teach the thing.  Relabelling them with the
+                   TARGET's own next move: held-out accuracy FELL (kind 0.860
+                   -> 0.785, angle 0.428 -> 0.350) because the task got
+                   harder, and search recovery went 0/6 -> 2/6.  The accuracy
+                   drop is the point: the old number was partly a leak.
+
+                   And `enumerate.py` parsed `sys.argv` AT IMPORT, so
+                   importing it here handed it smc's arguments -- the
+                   particle count 64 became the climb's move bound, and a
+                   search described as "all 3705 structures of <= 3 moves"
+                   was free to escape to 64.  Its own output gave it away: a
+                   5-move winner from a 3-move space, and a recovery of 5/10
+                   that is really 7/10.  Step 3's published numbers are
+                   unaffected -- it was always run as a script with the
+                   intended argv -- and the constants are now defaults that
+                   `main` overrides.
+
+                   What would close the gap, in the order worth trying: the
+                   policy only ever sees states some program's prefix
+                   produced, while a rollout visits states no program would
+                   draw, which is exposure bias and wants rollout-based
+                   training; 4000 steps is a small budget; and the pose
+                   proposal is deliberately weak until step 8.
     8  scene.py    the colour/blur/background layer and its one-shot head (new)
     9  SVHN, and the domain gap measured rather than assumed
     10 abstraction: mine fragments from the fitted corpus, add them to the

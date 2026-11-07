@@ -65,9 +65,13 @@ from . import fit as PF
 
 CFG = PN.PEN
 OUT = "out_shots"
-N_TGT = int(sys.argv[1]) if len(sys.argv) > 1 else 12
-NMAX = int(sys.argv[2]) if len(sys.argv) > 2 else 2
-REAL = len(sys.argv) > 3 and sys.argv[3] == "real"
+# Defaults, NOT argv.  Reading sys.argv at import time makes this module
+# behave differently depending on who imported it: `smc.py` compares against
+# the enumeration, passes 64 as its particle count, and silently got NMAX=64
+# -- a climb allowed to escape to 64 moves, returning 5-move winners from a
+# search over 3-move structures.  main() parses the command line; everything
+# else takes its bound as an argument.
+N_TGT, NMAX, REAL = 12, 2, False
 # Stage A shortlists cheaply over everything, stage B refits the survivors
 # properly.  Measured on CPU: 50 ms per fit at 150 iterations, 130 at 400, so
 # spending the long runs only on the top few is a 7x saving overall.
@@ -205,7 +209,7 @@ def bic_par(progs, cfg=CFG, n=32 * 32):
     return 0.5 * k * np.log(n)
 
 
-def rank_one(hyps, tgt, seed=0, must=None):
+def rank_one(hyps, tgt, seed=0, must=None, nmax=None):
     """Fit every hypothesis to one target and rank by description length.
 
     `must` is a hypothesis index that goes into stage B whether or not stage A
@@ -222,7 +226,8 @@ def rank_one(hyps, tgt, seed=0, must=None):
     if must is not None and not recall:
         seeds.append(hyps[must])          # measure ranking, not stage A's luck
     seen = climb(seeds, tgt, seed=seed, rounds=B_ROUNDS, keep=B_KEEP,
-                 n_restart=B_RESTART, n_iter=B_ITER, nmax=NMAX)
+                 n_restart=B_RESTART, n_iter=B_ITER,
+                 nmax=NMAX if nmax is None else nmax)
     progs = list(seen)
     pb = np.stack([seen[q][2] for q in progs])
     fb = np.array([seen[q][1] for q in progs])
@@ -235,6 +240,9 @@ def rank_one(hyps, tgt, seed=0, must=None):
 
 
 def main():
+    global N_TGT, NMAX
+    N_TGT = int(sys.argv[1]) if len(sys.argv) > 1 else N_TGT
+    NMAX = int(sys.argv[2]) if len(sys.argv) > 2 else NMAX
     rng = np.random.default_rng(0)
     hyps = PN.structures(CFG, nmax=NMAX)
     gen, gp, tgt = make_targets(rng, hyps, N_TGT)
@@ -357,6 +365,9 @@ def main_real():
     between competing structures, so unlike the synthetic case the ranking is
     not decided by optimiser luck.
     """
+    global N_TGT, NMAX
+    N_TGT = int(sys.argv[1]) if len(sys.argv) > 1 else N_TGT
+    NMAX = int(sys.argv[2]) if len(sys.argv) > 2 else NMAX
     d = D.load()
     tgt = np.asarray(d["ink"], np.float32)[:N_TGT]
     lab = np.asarray(d["y"]).reshape(-1).astype(int)[:N_TGT]
@@ -409,4 +420,4 @@ def main_real():
 
 
 if __name__ == "__main__":
-    main_real() if REAL else main()
+    main_real() if len(sys.argv) > 3 and sys.argv[3] == "real" else main()

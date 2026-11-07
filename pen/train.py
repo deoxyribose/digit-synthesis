@@ -76,7 +76,7 @@ def baseline(hold):
         if f:                                  # angle/length masks are per kind
             k = np.concatenate([np.asarray(b["act"][:, 0]) for b in hold])
             mk = mk[np.arange(len(k)), k]
-        ok = (y >= 0) & (md == 0)         # scored where the net is scored
+        ok = (y >= 0) & (md != 2)         # scored where the net is scored
         cnt = np.bincount(y[ok], minlength=n).astype(np.float64)
         pred = (mk[ok] * cnt).argmax(1)
         out.append(float((pred == y[ok]).mean()))
