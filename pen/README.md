@@ -725,25 +725,87 @@ compare against.
                    ceiling to measure against:
 
                        run          recovered   median mse    s/target
-                       prior            3/10     8.84e-06       11.5
-                       net              3/10     4.21e-06       10.7
-                       net+pose         4/10     5.39e-06       13.7
-                       enumerate        7/10          --        33
+                       prior            2/10     3.23e-06       17.1
+                       net              3/10     2.78e-08       11.6
+                       net+pose         5/10     1.10e-08       11.2
+                       enumerate        7/10          --        36
 
-                   So: 3x faster and recovers half as often.  The proposer
-                   beats the prior on FIT (2.1x lower mse) and ties it on
-                   RECOVERY, which is the honest summary -- it has learned
-                   to draw something that looks right, not yet to pick the
-                   right program.  Both recovery counts are conservative:
-                   the enumeration's three misses are mostly equivalences
-                   (`-180` for `+180` is the 180-degree rotation `phi0` can
-                   produce), as step 3 already documented.
+                   Three times faster, recovers rather less often.  The
+                   proposer is 116x better than the prior on FIT and ahead
+                   on RECOVERY, and with the pose it reaches 5/10 against
+                   the exhaustive 7/10.
+
+                   THE MARGIN ONLY APPEARED ONCE THE FITTER WAS FIXED.
+                   Before the polish below these same runs read 8.84e-06 /
+                   4.21e-06 / 5.39e-06 -- a 2.1x margin, which I had written
+                   up as "it draws something that looks right but cannot
+                   pick the right program".  That reading was an artefact:
+                   optimisation slack sat on every candidate and compressed
+                   the gap between a structurally right proposal and a
+                   structurally wrong one.  A better fit rescues a wrong
+                   structure only so far, so polishing separated them.
 
                    On full-length targets (6.3 moves on average) the picture
                    is the same shape: recovery 2/6 against the prior's 0/6
                    and 2.6x lower mse.
 
-                   TWO BUGS OF MINE ALONG THE WAY, both found by a control
+                   THE FITTER, NOT THE SEARCH, WAS DECIDING THE RANKINGS.
+                   Two identical runs disagreed about one target, `+135` vs
+                   `-135` -- same code, same target, GPU reduction order.
+                   Chasing that: fit a noiseless target's OWN generating
+                   structure, which can reach zero, at the search's budget
+                   and at a serious one.
+
+                       8 restarts x 400 iters    median mse 2.2e-07
+                       64 x 1200                 median mse 3.7e-10
+                       median gain               3429 nats
+
+                   The prior prices a whole extra move at 3.2 nats, so
+                   (n/2) log mse made every structure comparison a contest
+                   of which one Adam happened to optimise better, by a
+                   factor of a thousand.  `fit.polish` now refits the best 8
+                   structures at 64 x 1200 before ranking, in BOTH searches,
+                   so they stay comparable; only the finalists pay for it.
+
+                   This affects STEP 3's numbers, which were measured
+                   without it: its recovery counts are a lower bound, and
+                   its real-crop table compares fitted programs against a
+                   hand-written gate that gains nothing from polishing, so
+                   that conclusion moves in its favour rather than against.
+                   Both are worth re-running.
+
+                   A tempting wrong fix, recorded because it looked right:
+                   score recovery up to the mirror (negate every angle),
+                   since the misses were `+180` for `-180`.  Measured, the
+                   mirror is NOT an equivalence -- median mse ratio 2.7, and
+                   `+45 -270` mirrors to something 157000x worse.  It only
+                   looked like one on the half-turns, where the mirror of a
+                   semicircle IS a rotation of it, and there the mirror was
+                   winning because the TRUE structure was under-fitted.  The
+                   mirror map is not even closed over the grammar: the spin
+                   alphabet has +180 and no -180.  Fixing the fitter fixed
+                   those targets and left the metric alone.
+
+                   TWO MORE BUGS, both found by WATCHING the particles
+                   rather than by a crash or a score.  `smc_film.png` is a
+                   row per particle, a column per move.
+
+                   Rows whose program grew by eight moves while the drawing
+                   did not change at all: the pen had walked off the page,
+                   where every later move lays invisible ink, the state
+                   stops changing and the policy never gets a reason to
+                   stop.  Those particles are weighted to the floor now.
+
+                   And from step 6 on, 48 identical frozen rows: resampling
+                   had replaced the whole population with copies of a
+                   FINISHED program, which can never diverge again.
+                   Resampling now runs among the live particles only.
+                   Neither changed the short-target table -- they remove
+                   wasted particles, 54 distinct structures where there were
+                   60 -- and both should matter where particles reach the
+                   move cap.
+
+                   TWO BUGS OF MINE EARLIER, both found by a control
                    rather than by a crash.
 
                    The policy was trained on the wrong labels.  A DIVERGENT

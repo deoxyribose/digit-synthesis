@@ -167,11 +167,12 @@ def _prior_logits(progs, cfg=CFG):
     return lk, la, ll
 
 
-def rollout(rng, tgt, n, w=None, oracle=None, cfg=CFG, temp=TEMP):
+def rollout(rng, tgt, n, w=None, oracle=None, cfg=CFG, temp=TEMP, trace=None):
     """Run `n` particles against one target.  Returns the structures seen.
 
     `w = None` is the prior control.  `oracle` is a (origin, phi0) pair to use
-    instead of the proposal.
+    instead of the proposal.  `trace`, if a list, collects (canvas, value) per
+    step so a rollout can be watched rather than only scored.
     """
     if oracle is None:
         org, phi = pose_proposal(rng, tgt, n)
@@ -196,6 +197,8 @@ def rollout(rng, tgt, n, w=None, oracle=None, cfg=CFG, temp=TEMP):
             break
         cv = canvases(progs, p, org, cfg)
         tip, hd = tips(progs, p, org, cfg)
+        if trace is not None:
+            trace.append((cv.copy(), val.copy(), list(progs)))
         km, am, lm = zip(*[DA.masks(q, cfg) for q in progs])
         km, am, lm = np.stack(km), np.stack(am), np.stack(lm)
         x = DA.channels(T, cv, tip, hd, cfg)
@@ -228,6 +231,15 @@ def rollout(rng, tgt, n, w=None, oracle=None, cfg=CFG, temp=TEMP):
                 @ w["len"] + w["lb"], jnp.asarray(lm[np.arange(n), kind])))
         lb = _pick(rng, ll, lm[np.arange(n), kind], temp)
 
+        # A pen outside the canvas is a dead particle: every later move lays
+        # ink nobody can see, so the state stops changing, the policy gets no
+        # signal to stop, and it proposes until the move cap.  The filmstrip
+        # is where this shows -- rows whose program grows by eight moves and
+        # whose drawing does not change at all.  Weighting them to the floor
+        # lets the next resample clear them out.
+        off = ((tip < -2.0) | (tip > cfg.H + 2.0)).any(1)
+        v = np.where(off, 1e-3, v)
+
         nxt = list(progs)
         for i in range(n):
             if done[i] or kind[i] == DA.KI["s"]:
@@ -247,14 +259,24 @@ def rollout(rng, tgt, n, w=None, oracle=None, cfg=CFG, temp=TEMP):
             if PN.legal(progs[i], cfg):
                 seen[progs[i]] = max(seen.get(progs[i], 0.0), float(val[i]))
 
-        # resample on the value, systematically, when the set has collapsed
-        q = np.maximum(val, 1e-6) ** (1.0 / TEMP_W)
-        q = q / q.sum()
-        if 1.0 / np.sum(q ** 2) < ESS_FRAC * n:
-            u = (rng.random() + np.arange(n)) / n
-            idx = np.searchsorted(q.cumsum(), u).clip(0, n - 1)
-            progs = [progs[i] for i in idx]
-            p, org, done, val = p[idx], org[idx], done[idx], val[idx]
+        # Resample on the value, systematically, when the set has collapsed --
+        # but only among the LIVE particles.  A finished program cannot
+        # diverge again, so resampling onto one replaces the whole population
+        # with copies of something that will never change: the filmstrip
+        # showed 48 identical frozen rows from step 6 on.  Finished particles
+        # keep their slot, are already in `seen`, and take no further part.
+        live = ~done
+        nl = int(live.sum())
+        if nl:
+            q = np.where(live, np.maximum(val, 1e-6) ** (1.0 / TEMP_W), 0.0)
+            q = q / q.sum()
+            if 1.0 / np.sum(q ** 2) < ESS_FRAC * nl:
+                u = (rng.random() + np.arange(nl)) / nl
+                take = np.searchsorted(q.cumsum(), u).clip(0, n - 1)
+                idx = np.arange(n)
+                idx[np.flatnonzero(live)] = take
+                progs = [progs[i] for i in idx]
+                p, org, done, val = p[idx], org[idx], done[idx], val[idx]
 
     for i in range(n):
         if PN.legal(progs[i], cfg):
@@ -272,6 +294,7 @@ def best(cands, tgt, cfg=CFG, seed=0):
         return None, np.inf, np.inf, None
     t = np.repeat(np.asarray(tgt, np.float32)[None], len(cands), 0)
     p, _, f = PF.run(cands, t, cfg, N_RESTART, N_ITER, 0.05, seed=seed)
+    p, f = PF.polish(cands, p, f, tgt, cfg, seed)
     L = PF.mdl(cands, p, f, cfg).sum(1)
     i = int(np.argmin(L))
     return cands[i], float(L[i]), float(f[i]), p[i]
@@ -290,6 +313,35 @@ def short_sample(rng, cfg=CFG, nmax=3):
             return q, PN.sample_params(rng, q, cfg)
 
 
+def film(w, cfg=CFG, seed=5, n=48, rows=6):
+    """One rollout, watched: each row a particle, each column a move.
+
+    What the scores cannot show -- whether the particles are exploring or
+    all drawing the same thing, and whether the value head is ranking them
+    the way a person would.
+    """
+    rng = np.random.default_rng(seed)
+    gen, gp = short_sample(rng, cfg)
+    gp = np.asarray(PN.scale_to_page(gp[None], PN.encode([gen], cfg), cfg))
+    tgt = np.asarray(PN.alpha(jnp.asarray(gp), PN.encode([gen], cfg), cfg))[0]
+    tr = []
+    rollout(np.random.default_rng(seed + 1), tgt, n, w, None, cfg, trace=tr)
+    last = tr[-1][1]
+    pick = np.argsort(-last)[:rows]
+    tiles, cap = [], []
+    for i in pick:
+        row = [IO.overlay(c[i], tgt) for c, _, _ in tr]
+        tiles.append(np.concatenate(row, axis=1))
+        cap.append((float(last[i]), PN.show(tr[-1][2][i])))
+    IO.save(f"{OUT}/smc_film.png", IO.grid(tiles, 1), 3)
+    print(f"generator {PN.show(gen)}, {len(tr)} steps, {n} particles")
+    print("  the {} particles the value head ranked highest:".format(rows))
+    for v, q in cap:
+        print(f"    v {v:.2f}   {q}")
+    print(f"\nwrote {OUT}/smc_film.png  (a row per particle, a column per "
+          f"move; red is the particle, blue the target it has not covered)")
+
+
 def main():
     n_tgt = int(sys.argv[1]) if len(sys.argv) > 1 else 8
     n_par = int(sys.argv[2]) if len(sys.argv) > 2 else 64
@@ -299,6 +351,8 @@ def main():
 
     wts = np.load(f"{OUT}/net_all.npy", allow_pickle=True).item()
     w = {k: jnp.asarray(v) for k, v in wts.items()}
+    if mode == "film":
+        return film(w, CFG)
 
     draw1 = (lambda: short_sample(rng, CFG)) if short else (lambda: PN.sample(rng, CFG))
     gen, gp = zip(*[draw1() for _ in range(n_tgt)])

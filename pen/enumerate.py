@@ -231,6 +231,7 @@ def rank_one(hyps, tgt, seed=0, must=None, nmax=None):
     progs = list(seen)
     pb = np.stack([seen[q][2] for q in progs])
     fb = np.array([seen[q][1] for q in progs])
+    pb, fb = PF.polish(progs, pb, fb, tgt, CFG, seed)
     parts = PF.mdl(progs, pb, fb, CFG)        # [residual, structure, params]
     tot = parts.sum(1)
     tot_bic = parts[:, 0] + parts[:, 1] + bic_par(progs)

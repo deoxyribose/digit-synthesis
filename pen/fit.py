@@ -190,6 +190,36 @@ def mdl(progs, p, m, cfg=PN.PEN, n=32 * 32):
     return np.column_stack([res, nat])
 
 
+POLISH_K, POLISH_RESTART, POLISH_ITER = 8, 64, 1200
+
+
+def polish(progs, p, m, tgt, cfg=PN.PEN, seed=0, k=POLISH_K):
+    """Refit the best `k` structures hard, then rank.
+
+    Measured: at the search's own budget (8 restarts x 400 iters) the
+    GENERATING structure of a noiseless target sits at median mse 2.2e-07
+    when it can reach 3.7e-10.  Through (n/2) log mse that slack is a median
+    3429 nats -- against a prior that prices a whole extra move at 3.2.  So
+    without this the ranking between two structures is decided by which one
+    Adam happened to optimise better, by a factor of a thousand, and the
+    symptom was two identical runs disagreeing about a target because the
+    fitter found a better optimum for the mirror than for the truth.
+
+    Only the finalists are refit, so the cost is a handful of structures
+    rather than the whole hypothesis space.
+    """
+    L = mdl(progs, p, m, cfg).sum(1)
+    top = np.argsort(L)[:k]
+    sub = [progs[i] for i in top]
+    t = np.repeat(np.asarray(tgt, np.float32)[None], len(sub), 0)
+    p2, _, m2 = run(sub, t, cfg, POLISH_RESTART, POLISH_ITER, 0.05, seed=seed)
+    p, m = np.array(p, copy=True), np.array(m, copy=True)
+    for j, i in enumerate(top):           # keep the better of the two fits
+        if m2[j] < m[i]:
+            p[i], m[i] = p2[j], m2[j]
+    return p, m
+
+
 def blank_mse(tgt):
     """What drawing NOTHING costs.  Study 1 found 21% of runs converge to this
     against a single stroke on an empty field; `[[ink-weighted-loss]]` found
